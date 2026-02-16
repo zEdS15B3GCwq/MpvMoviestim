@@ -1,0 +1,9 @@
+increase performance:
+opengl-pbo=yes (but can cause latency on some drivers, not needed on full gpu only)
+dither=no
+(deband=no) not enabled by default anyway
+rgba16f / gl_half_float
+tone-mapping=clip (sdr only content)
+hwdec=auto-safe
+scale=bilinear
+
