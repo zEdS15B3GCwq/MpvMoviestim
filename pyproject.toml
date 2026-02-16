@@ -6,4 +6,5 @@ readme = "README.md"
 requires-python = ">=3.9"
 dependencies = [
     "mpv>=1.0.8",
+    "psychopy>=2025.2.4",
 ]
