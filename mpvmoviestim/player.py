@@ -5,10 +5,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from pyglet import gl
-
 import mpv
 from psychopy import event, logging, visual
+from pyglet import gl
 
 from . import mpv_utils
 
@@ -41,8 +40,8 @@ test_options = TestOptions()
 
 
 class MpvPlayer:
-    c_getproc = None
-    player = None
+    c_getproc: ctypes._CFunctionType
+    player: mpv.MPV
     mpv_options: dict[str, bool | int | float | str] = {
         "vo": "libmpv",
         "hwdec": "auto-safe",
@@ -59,7 +58,7 @@ class MpvPlayer:
     render_mode: Literal["auto"] | Literal["direct"] | Literal["threaded"] = "auto"
 
     def __init__(self, audio=True, extra_options=None):
-        self.c_getproc = mpv_utils.get_proc_address
+        self.c_getproc = mpv.MpvGlGetProcAddressFn(mpv_utils.get_proc_address)
 
         if audio:
             self.mpv_options["volume"] = 100
