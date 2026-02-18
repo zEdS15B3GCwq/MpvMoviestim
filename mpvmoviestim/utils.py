@@ -6,9 +6,8 @@ import importlib
 from typing import TYPE_CHECKING
 
 import pyglet
-from pyglet import gl
-
 from psychopy import logging
+from pyglet import gl
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -495,3 +494,14 @@ def test_blit(
     # Unbind FBOs
     # gl.glBindFramebuffer(gl.GL_READ_FRAMEBUFFER, 0)
     # gl.glBindFramebuffer(gl.GL_DRAW_FRAMEBUFFER, 0)
+
+
+# Create a function that retrieves the texture pixel format of the screen backbuffer that psychopy's window uses,
+# or if the window's usefbo is set, then query that fbo's pixel format. The function expects an input parameter
+# with the psychopy (pyglet based) windows, and outputs a string such as rgba8, rgba16f and similar pixel formats.
+# If this is not possible for the backbuffer, return bit/colour channel information.
+# important values:
+# win.useFBO: bool - True if psychopy window uses FBO
+# win.frameBuffer: gl.GLuint - if useFBO, then this is the FBO's gl ID (probably need to get it's value property)
+# win.frameTexture: gl.GLuint - if useFBO, this is the texture bound to frameBuffer (also need .value probably)
+# win.frameBufferSize -> w, h tuple (function that returns self.backend.frameBufferSize)

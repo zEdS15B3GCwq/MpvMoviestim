@@ -9,7 +9,7 @@ import mpv
 from psychopy import event, logging, visual
 from pyglet import gl
 
-from . import mpv_utils
+from . import utils
 
 if TYPE_CHECKING:
     from typing import Any, Literal
