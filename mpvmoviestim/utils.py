@@ -496,12 +496,25 @@ def test_blit(
     # gl.glBindFramebuffer(gl.GL_DRAW_FRAMEBUFFER, 0)
 
 
-# Create a function that retrieves the texture pixel format of the screen backbuffer that psychopy's window uses,
-# or if the window's usefbo is set, then query that fbo's pixel format. The function expects an input parameter
-# with the psychopy (pyglet based) windows, and outputs a string such as rgba8, rgba16f and similar pixel formats.
-# If this is not possible for the backbuffer, return bit/colour channel information.
-# important values:
-# win.useFBO: bool - True if psychopy window uses FBO
-# win.frameBuffer: gl.GLuint - if useFBO, then this is the FBO's gl ID (probably need to get it's value property)
-# win.frameTexture: gl.GLuint - if useFBO, this is the texture bound to frameBuffer (also need .value probably)
-# win.frameBufferSize -> w, h tuple (function that returns self.backend.frameBufferSize)
+def windows_set_scaling_aware() -> None:
+    """Tell Windows we're DPI-aware to get full screen resolution."""
+    if pyglet.compat_platform == "win32":
+        try:
+            ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_int64(-4))
+            print("Windows dpi-ware process context set successfully")
+        except Exception as e:  # pylint: disable=W0718
+            print(f"WARNING: failed to set process DPI awareness context: {e}")
+
+
+def windows_get_screen_dpi() -> tuple[int, int] | None:
+    """Get active screen's DPI on Windows."""
+    if pyglet.compat_platform == "win32":
+        # get active screen's dpi
+        try:
+            hdc = ctypes.windll.user32.GetDC(0)
+            dpi_x = ctypes.windll.gdi32.GetDeviceCaps(hdc, 88)  # LOGPIXELSX
+            dpi_y = ctypes.windll.gdi32.GetDeviceCaps(hdc, 90)  # LOGPIXELSY
+            return dpi_x, dpi_y
+        except Exception as e:  # pylint: disable=W0718
+            print(f"WARNING: failed to get active screen DPI: {e}")
+    return None
