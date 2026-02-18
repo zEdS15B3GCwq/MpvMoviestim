@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import mpv
+import pyglet
 from psychopy import event, logging, visual
 from pyglet import gl
 
@@ -58,7 +59,7 @@ class MpvPlayer:
     render_mode: Literal["auto"] | Literal["direct"] | Literal["threaded"] = "auto"
 
     def __init__(self, audio=True, extra_options=None):
-        self.c_getproc = mpv.MpvGlGetProcAddressFn(mpv_utils.get_proc_address)
+        self.c_getproc = mpv.MpvGlGetProcAddressFn(utils.get_proc_address)
 
         if audio:
             self.mpv_options["volume"] = 100
@@ -71,7 +72,7 @@ class MpvPlayer:
         if extra_options is not None:
             self.mpv_options.update(extra_options)
 
-        self.player = mpv.MPV(**self.mpv_options)
+        self.player = mpv.MPV(**self.mpv_options)  # type: ignore
 
         self.mpv_render_ctx = mpv.MpvRenderContext(
             self.player,
@@ -84,8 +85,8 @@ class MpvPlayer:
 
 
 def mpv_log_fn(level: int, prefix: str, text: str) -> None:
-    print(f"MPV LOG: {level=}, {prefix=}, {text=}")
-    logging.exp(f"MPV LOG: {text}")
+    print(f"MPV: {level=}, {prefix=}, {text=}")
+    logging.exp(f"MPV: {text}")
 
 
 def main() -> None:
@@ -93,11 +94,19 @@ def main() -> None:
     logging.console.setLevel(logging.EXP)
 
     # ignore Windows screen scaling
-    ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_int64(-4))
+    utils.windows_set_scaling_aware()
+
+    display = pyglet.canvas.get_display()
+    screen = display.get_default_screen()
+
+    window_size = (
+        min(screen.width, test_options.psychopy_window_size[0]),
+        min(screen.height, test_options.psychopy_window_size[1]),
+    )
 
     # create PsychoPy window
     win = visual.Window(
-        size=test_options.psychopy_window_size,
+        size=window_size,
         fullscr=test_options.psychopy_window_fullscreen,
         useFBO=test_options.psychopy_window_use_fbo,
         waitBlanking=test_options.psychopy_window_wait_blanking,
@@ -110,3 +119,5 @@ def main() -> None:
         "loglevel": "info",
         "wid": 0,
     }
+
+    player = MpvPlayer(audio=test_options.mpv_enable_audio, extra_options=mpv_options)
