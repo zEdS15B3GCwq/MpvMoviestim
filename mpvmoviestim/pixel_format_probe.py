@@ -36,7 +36,9 @@ def _infer_backbuffer_format(red: int, green: int, blue: int, alpha: int) -> str
     return ""
 
 
-def get_psychopy_target_pixel_format(win: visual.Window) -> tuple[str, int]:
+def get_psychopy_target_pixel_format(
+    win: visual.Window,
+) -> tuple[str, int, tuple[int, int]]:
     """Return (pixel_format, target_fbo_id) for a PsychoPy/Pyglet window.
 
     Parameters
@@ -46,11 +48,14 @@ def get_psychopy_target_pixel_format(win: visual.Window) -> tuple[str, int]:
 
     Returns
     -------
-    (pixel_format, target_fbo_id): tuple[str, int]
-        The first return value is a best-match format string (for example
-        ``rgba32f``), or empty string if undetermined. The second return value
-        is the target FBO OpenGL id, or ``0`` when the window backbuffer is
-        the target.
+    tuple[str, int, tuple[int, int]], with elements:
+        pixel_format: str
+            Best-match format string (for example ``rgba32f``), or empty string
+            if undetermined.
+        target_fbo_id: int
+            Psychopy's render FBO, or 0 when the window backbuffer is the target.
+        width, height: tuple[int, int]
+            Size of the target buffer
 
     Notes
     -----
@@ -115,4 +120,4 @@ def get_psychopy_target_pixel_format(win: visual.Window) -> tuple[str, int]:
             f"chosen format: {format_name if format_name else '<default>'}."
         )
 
-    return format_name, target_fbo
+    return format_name, target_fbo, win.frameBufferSize
