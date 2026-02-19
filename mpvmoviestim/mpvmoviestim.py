@@ -40,12 +40,15 @@ class MpvmMoviestim:
         "volume": 100,
         "volume_gain": 0,
         "audio_device": "auto",
+        # "audio-stream-silence": True,  # feeds ao silent audio even when paused
     }
     loaded_movie: Path | None = None
 
     def __init__(
         self,
         window: visual.Window,
+        fileName: Path | str | None = None,
+        autoStart: bool = False,
         noAudio: bool = False,
         mpv_options: dict[str, Any] | None = None,
     ):
@@ -63,7 +66,7 @@ class MpvmMoviestim:
 
         # create MPV player instance
         self.player = mpv.MPV(**self.mpv_options)  # type: ignore
-        self.player.observe_property("frame-drop-count", self._on_drop)
+        # self.player.observe_property("frame-drop-count", self._on_drop)
         self.player.observe_property("eof-reached", self._on_eof)
 
         # setup OpenGL context
@@ -74,6 +77,12 @@ class MpvmMoviestim:
             opengl_init_params={"get_proc_address": self.c_getproc},
         )
         self.window = window
+
+        if fileName is not None:
+            self.loadMovie(fileName)
+
+        if autoStart:
+            self.play()
 
     def _mpv_log_fn(self, level: int, prefix: str, text: str) -> None:
         print(f"MPV: {level=}, {prefix=}, {text=}")
@@ -87,13 +96,25 @@ class MpvmMoviestim:
         print(f"Frame dropped. Property {prop_name} changed to {value}")
         # TODO
 
-    def loadMovie(self, file: Path | str) -> None:
-        if isinstance(file, str):
-            file = Path(file)
-        if not file.exists():
-            logging.error(f"File '{file}' does not exist.")
-            raise FileNotFoundError(f"File '{file}' does not exist.")
-        self.player.play(file)
+    def loadMovie(self, fileName: Path | str) -> None:
+        if isinstance(fileName, str):
+            fileName = Path(fileName)
+        if not fileName.exists():
+            logging.error(f"File '{fileName}' does not exist.")
+            raise FileNotFoundError(f"File '{fileName}' does not exist.")
+        self.player.play(fileName)
 
-    def load(self, file: Path | str) -> None:
-        self.loadMovie(file)
+    def load(self, fileName: Path | str) -> None:
+        self.loadMovie(fileName)
+
+    def play(self) -> None:
+        # TODO
+        pass
+
+    def pause(self) -> None:
+        # TODO
+        pass
+
+    def stop(self) -> None:
+        # TODO
+        pass

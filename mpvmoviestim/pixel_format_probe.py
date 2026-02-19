@@ -99,7 +99,7 @@ def get_psychopy_target_pixel_format(
                 "(expected rgba32f)."
             )
 
-        target_fbo = int(win.frameBuffer)
+        target_fbo = win.frameBuffer.value
 
     else:
         red_bits = _get_gl_int(int(gl.GL_RED_BITS))
