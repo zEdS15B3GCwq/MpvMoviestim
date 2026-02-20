@@ -105,7 +105,7 @@ class MpvState(Enum):
     PLAYING = auto()  # playing
 
 
-class MpvmMoviestim:
+class MpvMoviestim:
     _c_getproc: ctypes._CFunctionType
     _window: visual.Window
     _player: mpv.MPV
@@ -168,7 +168,6 @@ class MpvmMoviestim:
             self._init_mpv_player()
             self.loadMovie(file, block)
 
-    @log_pre_post
     @state_guard(allowed_state=MpvState.UNKNOWN)
     def _init_mpv_player(self) -> None:
         # create MPV player instance
@@ -324,6 +323,8 @@ class MpvmMoviestim:
     @property
     def _mpv_state(self) -> MpvState:
         # TODO: test
+        if self._player is None:
+            return MpvState.UNKNOWN
         if self._player.pause:
             return MpvState.PAUSED
         if self._player.core_shutdown:
