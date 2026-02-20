@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import ctypes
+from typing import TYPE_CHECKING
 
-from psychopy import logging, visual
 from pyglet import gl
+
+if TYPE_CHECKING:
+    from psychopy import visual
+
 
 _INTERNAL_FORMAT_MAP: dict[int, str] = {
     int(getattr(gl, "GL_RGBA32F", 0x8814)): "rgba32f",
@@ -19,26 +23,26 @@ _INTERNAL_FORMAT_MAP: dict[int, str] = {
 }
 
 
-def _infer_backbuffer_format(red: int, green: int, blue: int, alpha: int) -> str:
+def _infer_backbuffer_format(red: int, green: int, blue: int, alpha: int) -> int:
     key = (red, green, blue, alpha)
     if key == (8, 8, 8, 8):
-        return "rgba8"
+        return int(getattr(gl, "GL_RGBA8", 0x8058))
     if key == (8, 8, 8, 0):
-        return "rgb8"
+        return int(getattr(gl, "GL_RGB8", 0x8051))
     if key == (10, 10, 10, 2):
-        return "rgb10_a2"
+        return int(getattr(gl, "GL_RGB10_A2", 0x8059))
     if key == (10, 10, 10, 0):
-        return "rgb10"
+        return int(getattr(gl, "GL_RGB10", 0x8052))
     if key == (16, 16, 16, 16):
-        return "rgba16"
+        return int(getattr(gl, "GL_RGBA16", 0x805B))
     if key == (16, 16, 16, 0):
-        return "rgb16"
-    return ""
+        return int(getattr(gl, "GL_RGB16", 0x8054))
+    return 0
 
 
 def get_psychopy_target_pixel_format(
     win: visual.Window,
-) -> tuple[str, int, tuple[int, int]]:
+) -> tuple[dict[str, int], str]:
     """Return (pixel_format, target_fbo_id) for a PsychoPy/Pyglet window.
 
     Parameters
@@ -48,14 +52,19 @@ def get_psychopy_target_pixel_format(
 
     Returns
     -------
-    tuple[str, int, tuple[int, int]], with elements:
-        pixel_format: str
-            Best-match format string (for example ``rgba32f``), or empty string
-            if undetermined.
-        target_fbo_id: int
+    dict[str, Any] (with elements corresponding to mpv.MpvOpenGLFBO)
+        fbo: int
             Psychopy's render FBO, or 0 when the window backbuffer is the target.
-        width, height: tuple[int, int]
-            Size of the target buffer
+        w: int
+            Width of the target buffer
+        h: int
+            Height of the target buffer
+        internal_format: int
+            OpenGL number of the best matching format.
+            This field is only present if a best format can be determined.
+    str
+        Best-match format string (for example ``rgba32f``), or empty string
+        if undetermined.
 
     Notes
     -----
@@ -92,12 +101,12 @@ def get_psychopy_target_pixel_format(
         internal_fmt = int(internal_format_value.value)
         format_name = _INTERNAL_FORMAT_MAP.get(internal_fmt, "")
 
-        if format_name != "rgba32f":
-            logging.info(
-                "PsychoPy intermediate FBO texture format is "
-                f"{format_name if format_name else str(hex(internal_fmt))} "
-                "(expected rgba32f)."
-            )
+        # if format_name != "rgba32f":
+        #     logging.info(
+        #         "PsychoPy intermediate FBO texture format is "
+        #         f"{format_name if format_name else str(hex(internal_fmt))} "
+        #         "(expected rgba32f)."
+        #     )
 
         target_fbo = win.frameBuffer.value
 
@@ -111,13 +120,21 @@ def get_psychopy_target_pixel_format(
         if bpc is not None:
             print(f"Psychopy window reports {bpc} bits per channel (win.bpc).")
 
-        format_name = _infer_backbuffer_format(
+        internal_fmt = _infer_backbuffer_format(
             red_bits, green_bits, blue_bits, alpha_bits
         )
-        logging.info(
-            "Psychopy window's backbuffer channel bits are "
-            f"({red_bits}, {green_bits}, {blue_bits}, {alpha_bits}); "
-            f"chosen format: {format_name if format_name else '<default>'}."
-        )
+        format_name = _INTERNAL_FORMAT_MAP.get(internal_fmt, "")
+        # logging.info(
+        #     "Psychopy window's backbuffer channel bits are "
+        #     f"({red_bits}, {green_bits}, {blue_bits}, {alpha_bits}); "
+        #     f"chosen format: {format_name if format_name else '<default>'}."
+        # )
 
-    return format_name, target_fbo, win.frameBufferSize
+    w, h = win.frameBufferSize
+
+    return {
+        "w": w,
+        "h": h,
+        "fbo": target_fbo,
+        "internal_format": internal_fmt,
+    }, format_name

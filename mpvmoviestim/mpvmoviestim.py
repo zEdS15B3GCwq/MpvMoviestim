@@ -2,15 +2,16 @@ from __future__ import annotations
 
 import ctypes
 import functools
-import re
 from enum import Enum, auto
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import mpv
 from psychopy import logging, visual
+from pyglet import gl
 
 from . import utils
+from .pixel_format_probe import get_psychopy_target_pixel_format
 
 if TYPE_CHECKING:
     from typing import Any, Callable
@@ -98,10 +99,10 @@ def state_guard(
 
 class MpvState(Enum):
     UNKNOWN = auto()
-    IDLE = auto()  # no file loaded
+    SHUTDOWN = auto()  # MPV player core has shut down after quit()
+    IDLE = auto()  # MPV core is active, no file loaded
     PAUSED = auto()  # file loaded but not playing
     PLAYING = auto()  # playing
-    SHUTDOWN = auto()  # MPV player core has shut down after quit()
 
 
 class MpvmMoviestim:
@@ -116,7 +117,7 @@ class MpvmMoviestim:
         "gpu_api": "opengl",  # use OpenGL API
         "keep-open": True,  # pause when reaching the end of the current file
         "idle": True,  # do not quit when there is no file to play
-        "pause": True,  # start paused (also set by autoStart)
+        "pause": True,  # start paused
         "wid": 0,  # do not create a new window (implied by other settings)
     }
     _mpv_default_audio_options: dict[str, Any] = {
@@ -129,6 +130,7 @@ class MpvmMoviestim:
     _autostart: bool
     _player_state: MpvState
     _threaded_mode: bool
+    _target_fbo: mpv.MpvOpenGLFBO
 
     def __init__(
         self,
@@ -155,9 +157,10 @@ class MpvmMoviestim:
 
         self._window = window
         self._autostart = autoStart
-        self._mpv_options["pause"] = not autoStart
+        # self._mpv_options["pause"] = not autoStart
         self._player_state = MpvState.UNKNOWN
         self._threaded_mode = False
+        self._report_swap_on_next = False
 
         if self._threaded_mode:
             raise NotImplementedError("Threaded mode not implemented yet.")
@@ -181,6 +184,21 @@ class MpvmMoviestim:
                 "opengl",
                 opengl_init_params={"get_proc_address": self._c_getproc},
             )
+
+            # determine the best pixel format to render to
+            # this is straightforward if useFBO is set,
+            # needs some guessing based on bit-per-colour values if not
+            inferred_fbo_format, format_name = get_psychopy_target_pixel_format(
+                self._window
+            )
+            logging.info(
+                f"Psychopy's rendering FBO: fbo={inferred_fbo_format['fbo']}, "
+                f"size={inferred_fbo_format['w']}x{inferred_fbo_format['h']}, "
+                f"format={format_name if format_name else '<undetermined>'}"
+            )
+            self._target_fbo = mpv.MpvOpenGLFBO(**inferred_fbo_format)
+
+            # set IDLE state, meaning core is active, file not loaded
             self._player_state = MpvState.IDLE
         except Exception as e:
             logging.error(f"Failed to initialize MPV player: {e}")
@@ -195,6 +213,7 @@ class MpvmMoviestim:
             f"EOF reached. Property {prop_name} changed to {value}; "
             f"mpv state: {self._mpv_state.name}"
         )
+        # TODO
 
     def _on_drop(self, prop_name, value) -> None:
         print(f"Frame dropped. Property {prop_name} changed to {value}")
@@ -210,22 +229,24 @@ class MpvmMoviestim:
         if not file.exists():
             logging.error(f"File '{file}' does not exist.")
             raise FileNotFoundError(f"File '{file}' does not exist.")
+        # self._player.loadfile(
+        #     filename=str(file), mode="replace", pause=not self._autostart
+        # )
+        # if self._autostart:
+        #     if block:
+        #         self._player.wait_until_playing()
+        #     self._player_state = MpvState.PLAYING
+        # else:
+        #     if block:
+        #         self._player.wait_until_paused()
+        #     self._player_state = MpvState.PAUSED
+        self._player.loadfile(filename=str(file), mode="replace")
         self._loaded_movie = file
-        self._player.loadfile(
-            filename=str(file), mode="replace", pause=not self._autostart
-        )
+        if block:
+            self._player.wait_until_paused()
+        logging.exp(f"Loaded movie '{file}' with autostart set to {self._autostart}.")
         if self._autostart:
-            if block:
-                self._player.wait_until_playing()
-            self._player_state = MpvState.PLAYING
-        else:
-            if block:
-                self._player.wait_until_paused()
-            self._player_state = MpvState.PAUSED
-        logging.exp(
-            f"Loaded movie '{file}' with autostart set to {self._autostart}. "
-            f"Current state: {self._player_state.name}"
-        )
+            self.play(block)
 
     def load(self, fileName: Path | str, block: bool = False) -> None:
         self.loadMovie(fileName, block)
@@ -233,6 +254,7 @@ class MpvmMoviestim:
     @log_pre_post
     @state_guard(allowed_state=MpvState.PAUSED)
     def play(self, block: bool = False) -> None:
+        self._report_swap_on_next = False
         self._player.pause = False
         if block:
             self._player.wait_until_playing()
@@ -261,6 +283,39 @@ class MpvmMoviestim:
     def preroll(self) -> None:
         # TODO
         pass
+
+    def draw(self) -> None:
+        if self._player_state != MpvState.PLAYING:
+            logging.warning(
+                f"Cannot draw(), expected PLAYING state, got {self._player_state.name}."
+            )
+            return
+
+        if self._threaded_mode:
+            raise NotImplementedError("Threaded mode not implemented yet.")
+
+        ctx = self._mpv_render_ctx
+        if ctx is None:
+            raise RuntimeError("render context is None")
+
+        if self._report_swap_on_next:
+            ctx.report_swap()
+            self._report_swap_on_next = False
+
+        if ctx.update():
+            self._report_swap_on_next = True
+
+        # save current viewport
+        viewport = (ctypes.c_int * 4)()
+        gl.glGetIntegerv(gl.GL_VIEWPORT, viewport)
+
+        # render frame directly either to screen backbuffer or PsychoPy's FBO
+        ctx.render(
+            opengl_fbo=self._target_fbo, flip_y=True, block_for_target_time=False
+        )
+
+        # restore viewport
+        gl.glViewport(*viewport)
 
     @property
     def state(self) -> MpvState:
