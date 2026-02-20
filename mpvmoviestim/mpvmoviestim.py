@@ -47,7 +47,7 @@ class MpvmMoviestim:
     def __init__(
         self,
         window: visual.Window,
-        fileName: Path | str | None = None,
+        file: Path | str,
         autoStart: bool = False,
         noAudio: bool = False,
         volume: int | float = 100,
@@ -80,8 +80,7 @@ class MpvmMoviestim:
         )
         self._window = window
 
-        if fileName is not None:
-            self.loadMovie(fileName)
+        self.loadMovie(file)
 
         if autoStart:
             self.play()
@@ -98,13 +97,13 @@ class MpvmMoviestim:
         print(f"Frame dropped. Property {prop_name} changed to {value}")
         # TODO
 
-    def loadMovie(self, fileName: Path | str) -> None:
-        if isinstance(fileName, str):
-            fileName = Path(fileName)
-        if not fileName.exists():
-            logging.error(f"File '{fileName}' does not exist.")
-            raise FileNotFoundError(f"File '{fileName}' does not exist.")
-        self._player.play(fileName)
+    def loadMovie(self, file: Path | str) -> None:
+        if isinstance(file, str):
+            file = Path(file)
+        if not file.exists():
+            logging.error(f"File '{file}' does not exist.")
+            raise FileNotFoundError(f"File '{file}' does not exist.")
+        self.player.play(file)
 
     def load(self, fileName: Path | str) -> None:
         self.loadMovie(fileName)
@@ -118,5 +117,9 @@ class MpvmMoviestim:
         pass
 
     def stop(self) -> None:
+        # TODO
+        pass
+
+    def preroll(self) -> None:
         # TODO
         pass
