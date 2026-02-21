@@ -168,6 +168,7 @@ class MpvMoviestim:
             self._init_mpv_player()
             self.loadMovie(file, block)
 
+    @log_pre_post
     @state_guard(allowed_state=MpvState.UNKNOWN)
     def _init_mpv_player(self) -> None:
         # create MPV player instance
@@ -195,7 +196,8 @@ class MpvMoviestim:
                 f"size={inferred_fbo_format['w']}x{inferred_fbo_format['h']}, "
                 f"format={format_name if format_name else '<undetermined>'}"
             )
-            self._target_fbo = mpv.MpvOpenGLFBO(**inferred_fbo_format)
+            # self._target_fbo = mpv.MpvOpenGLFBO(**inferred_fbo_format)
+            self._target_fbo = inferred_fbo_format
 
             # set IDLE state, meaning core is active, file not loaded
             self._player_state = MpvState.IDLE
@@ -243,6 +245,7 @@ class MpvMoviestim:
         self._loaded_movie = file
         if block:
             self._player.wait_until_paused()
+        self._player_state = MpvState.PAUSED
         logging.exp(f"Loaded movie '{file}' with autostart set to {self._autostart}.")
         if self._autostart:
             self.play(block)
@@ -284,6 +287,7 @@ class MpvMoviestim:
         pass
 
     def draw(self) -> None:
+        # don't use log wrapper for performance reasons
         if self._player_state != MpvState.PLAYING:
             logging.warning(
                 f"Cannot draw(), expected PLAYING state, got {self._player_state.name}."
@@ -296,6 +300,8 @@ class MpvMoviestim:
         ctx = self._mpv_render_ctx
         if ctx is None:
             raise RuntimeError("render context is None")
+
+        # ctx.report_swap()
 
         if self._report_swap_on_next:
             ctx.report_swap()
@@ -323,7 +329,7 @@ class MpvMoviestim:
     @property
     def _mpv_state(self) -> MpvState:
         # TODO: test
-        if self._player is None:
+        if not hasattr(self, "_player") or self._player is None:
             return MpvState.UNKNOWN
         if self._player.pause:
             return MpvState.PAUSED
