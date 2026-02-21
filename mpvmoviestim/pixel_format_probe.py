@@ -131,10 +131,12 @@ def get_psychopy_target_pixel_format(
         # )
 
     w, h = win.frameBufferSize
-
-    return {
+    fbo_info: dict[str, int] = {
         "w": w,
         "h": h,
         "fbo": target_fbo,
-        "internal_format": internal_fmt,
-    }, format_name
+    }
+    if internal_fmt != 0:
+        fbo_info["internal_format"] = internal_fmt
+
+    return fbo_info, format_name

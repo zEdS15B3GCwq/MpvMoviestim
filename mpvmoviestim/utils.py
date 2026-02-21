@@ -13,6 +13,30 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from types import ModuleType
 
+    from mpv import MpvRenderContext
+
+
+_PIXEL_FORMAT_MAP: dict[int, tuple[int, int, str]] = {
+    int(getattr(gl, "GL_RGBA32F", 0x8814)): (gl.GL_RGBA, gl.GL_FLOAT, "RGBA32F"),
+    int(getattr(gl, "GL_RGB32F", 0x8815)): (gl.GL_RGB, gl.GL_FLOAT, "RGB32F"),
+    int(getattr(gl, "GL_RGBA16F", 0x881A)): (gl.GL_RGBA, gl.GL_HALF_FLOAT, "RGBA16F"),
+    int(getattr(gl, "GL_RGB16F", 0x881B)): (gl.GL_RGB, gl.GL_HALF_FLOAT, "RGB16F"),
+    int(getattr(gl, "GL_RGBA8", 0x8058)): (gl.GL_RGBA, gl.GL_UNSIGNED_BYTE, "RGBA8"),
+    int(getattr(gl, "GL_RGB8", 0x8051)): (gl.GL_RGB, gl.GL_UNSIGNED_BYTE, "RGB8"),
+    int(getattr(gl, "GL_RGB10_A2", 0x8059)): (
+        gl.GL_RGBA,
+        gl.GL_UNSIGNED_INT_2_10_10_10_REV,
+        "RGB10_A2",
+    ),
+    int(getattr(gl, "GL_RGB10", 0x8052)): (
+        gl.GL_RGB,
+        gl.GL_UNSIGNED_INT_10_10_10_2,
+        "RGB10",
+    ),
+    int(getattr(gl, "GL_RGBA16", 0x805B)): (gl.GL_RGBA, gl.GL_UNSIGNED_SHORT, "RGBA16"),
+    int(getattr(gl, "GL_RGB16", 0x8054)): (gl.GL_RGB, gl.GL_UNSIGNED_SHORT, "RGB16"),
+}
+
 
 def _resolve_gl_proc_with_pyglet(name: bytes) -> int:
     """Resolve GL function name to pointer using pyglet backends.
@@ -102,7 +126,7 @@ def _resolve_gl_proc_with_pyglet(name: bytes) -> int:
     return 0
 
 
-def get_proc_address(_ctx, name: bytes) -> int:
+def get_proc_address(_ctx: MpvRenderContext, name: bytes) -> int:
     """Return GL function address or 0.
 
     Parameters
@@ -124,7 +148,7 @@ def get_proc_address(_ctx, name: bytes) -> int:
         return 0
 
 
-def create_texture(w, h, preferred_format="rgba8") -> tuple[int, bool]:
+def create_texture(w: int, h: int, internal_format: int = gl.GL_RGBA8) -> int:
     """Create a texture.
 
     Parameters
@@ -132,16 +156,13 @@ def create_texture(w, h, preferred_format="rgba8") -> tuple[int, bool]:
     w, h : int
         width and height of texture in pixels
 
-    preferred_format : str
-        texture pixel format, one of: rgba8, rgba16f, rgba32f
-        unknown or unsupported formats fall back to rgba8
+    internal_format : int
+        texture pixel format, e.g. GL_RGBA8, GL_RGBA16, etc.
 
     Returns
     -------
     int
         texture ID
-    bool
-        true if the incoming pixels and internal storage are floating point
 
     Notes
     -----
@@ -149,14 +170,7 @@ def create_texture(w, h, preferred_format="rgba8") -> tuple[int, bool]:
     * Incoming pixel type is determined from the preferred format:
       GL_FLOAT for float types and GL_UNSIGNED BYTE for unsigned byte types.
     * Internal floating point formats may not be supported on some mobile
-      or legacy platforms. If not available, the internal format is set to
-      GL_RGBA8, and the incoming pixel type to GL_UNSIGNED_BYTE. It would
-      be possible to allow floating point pixel data uploads and let the
-      driver take care of the conversion, but this module was designed to
-      try to avoid such situations. Therefore, the incoming type is fixed
-      to the storage type. Callers are expected to check the 2nd return
-      value that indicates whether the incoming pixels and the storage
-      types are expected to be floating point or not.
+      or legacy platforms.
     """
     # Generate texture
     tex = ctypes.c_uint(0)
@@ -171,38 +185,40 @@ def create_texture(w, h, preferred_format="rgba8") -> tuple[int, bool]:
     gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_T, gl.GL_CLAMP_TO_EDGE)
 
     # Pick texture storage format parameters
-    incoming_format = getattr(gl, "GL_RGBA", gl.GL_RGBA)
+    # incoming_format = getattr(gl, "GL_RGBA", gl.GL_RGBA)
 
-    # Pick internal format according to requested format with fallback to GL_RGBA
-    # This code is somewhat defensive in not assuming that the requested formats exist
-    internal_format = gl.GL_RGBA8
-    incoming_pixel_type = gl.GL_UNSIGNED_BYTE
-    label = "GL_RGBA8"
-    incoming_is_float = False
-    label = ""
-    if (
-        preferred_format.lower() == "rgba32f"
-        and (t := getattr(gl, "GL_RGBA32F", None)) is not None
-    ):
-        internal_format = t
-        incoming_pixel_type = gl.GL_FLOAT
-        label = "GL_RGBA32F"
-        incoming_is_float = True
-    elif (
-        preferred_format.lower() == "rgba16f"
-        and (t := getattr(gl, "GL_RGBA16F", None)) is not None
-    ):
-        internal_format = t
-        incoming_pixel_type = gl.GL_FLOAT
-        label = "GL_RGBA16F"
-        incoming_is_float = True
+    # # Pick internal format according to requested format with fallback to GL_RGBA
+    # # This code is somewhat defensive in not assuming that the requested formats exist
+    # internal_format = gl.GL_RGBA8
+    # incoming_pixel_type = gl.GL_UNSIGNED_BYTE
+    # label = "GL_RGBA8"
+    # incoming_is_float = False
+    # label = ""
+    # if (
+    #     format.lower() == "rgba32f"
+    #     and (t := getattr(gl, "GL_RGBA32F", None)) is not None
+    # ):
+    #     internal_format = t
+    #     incoming_pixel_type = gl.GL_FLOAT
+    #     label = "GL_RGBA32F"
+    #     incoming_is_float = True
+    # elif (
+    #     format.lower() == "rgba16f"
+    #     and (t := getattr(gl, "GL_RGBA16F", None)) is not None
+    # ):
+    #     internal_format = t
+    #     incoming_pixel_type = gl.GL_FLOAT
+    #     label = "GL_RGBA16F"
+    #     incoming_is_float = True
 
-    logging.debug(
-        f"Generating GL texture with requested format {preferred_format}: "
-        f"internal format={label}, "
-        f"incoming type={'GL_FLOAT' if incoming_pixel_type == gl.GL_FLOAT else 'GL_UNSIGNED_BYTE'}, "
-        "incoming format=GL_RGBA"
+    # lookup incoming format values in mapping; fail with error if unknown
+    incoming_format, incoming_pixel_type, label = _PIXEL_FORMAT_MAP.get(
+        internal_format, (0, 0, "")
     )
+    if label == "":
+        raise ValueError(f"Unknown incoming format {hex(internal_format)}")
+
+    logging.debug(f"Generating GL texture with format {label}")
 
     # Allocate storage
     gl.glTexImage2D(
@@ -220,7 +236,7 @@ def create_texture(w, h, preferred_format="rgba8") -> tuple[int, bool]:
     # Unbind
     gl.glBindTexture(gl.GL_TEXTURE_2D, 0)
 
-    return tex_id, incoming_is_float
+    return tex_id
 
 
 def destroy_texture(tex_id: int) -> None:
