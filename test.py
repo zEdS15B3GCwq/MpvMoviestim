@@ -7,6 +7,7 @@ from time import perf_counter
 import numpy as np
 import pyglet
 from matplotlib import pyplot as plt
+from numpy.conftest import dtype
 from psychopy import logging, visual
 
 from mpvmoviestim import mpvmoviestim, utils
@@ -100,17 +101,24 @@ def main() -> None:
 
     player.play(block=True)
     row = np.zeros((8,), dtype=np.float64)
-    times = np.zeros((1000, 8), dtype=np.float64)
+    times = np.zeros((1000, 9), dtype=np.float64)
+    frame_info_target_times = np.zeros((1000,), dtype=np.int64)
+    frame_info_flags = np.zeros((1000,), dtype=np.int64)
+    frame_info: dict[str, int] = {}
     n = 0
     while n < times.shape[0]:
         t0 = perf_counter()
-        player.draw(row)
+        player.draw(row, frame_info)
 
         instructions.draw()
+
+        frame_info_target_times[n] = frame_info.get("target_time", 0)
+        frame_info_flags[n] = frame_info.get("flags", 0)
 
         t1 = perf_counter()
         row[-1] = t1 - t0
         times[n] = row
+
         player.report_swap()
         win.flip()
         n += 1
@@ -132,6 +140,7 @@ def main() -> None:
         "checks",
         "report_swap",
         "update",
+        "frame_info",
         "backup viewport",
         "render",
         "restore viewport",
@@ -164,6 +173,9 @@ def main() -> None:
         f"frame intervals: {np.mean(frame_intervals):.3f} "
         f"({np.min(frame_intervals)}-{np.max(frame_intervals)}) ms"
     )
+
+    print(frame_info_target_times[:100])
+    print(frame_info_flags[:100])
 
     plt.tight_layout()
     plt.show()

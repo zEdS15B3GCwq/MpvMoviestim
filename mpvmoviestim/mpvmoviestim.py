@@ -356,7 +356,7 @@ class MpvMoviestim:
     #     # self._player.volume = vol
     #     self._player.command("frame-step", "1")
 
-    def draw(self, timings) -> None:
+    def draw(self, timings, frameinfo) -> None:
         # don't use guard wrapper for performance reasons
         if self._player_state != MpvState.PLAYING:
             logging.warning(
@@ -386,36 +386,42 @@ class MpvMoviestim:
         t2a = t2b = 0
 
         t3a = perf_counter()
-        if ctx.update():
-            t3b = perf_counter()
+        update = ctx.update()
+        t3b = perf_counter()
+
+        t4a = perf_counter()
+        finfo = ctx.next_frame_info
+        frameinfo.update(finfo)
+        t4b = perf_counter()
+
+        if update:
             self._report_swap_on_next = True
 
             # save current viewport
-            t4a = perf_counter()
+            t5a = perf_counter()
             viewport = (ctypes.c_int * 4)()
             gl.glGetIntegerv(gl.GL_VIEWPORT, viewport)
-            t4b = perf_counter()
+            t5b = perf_counter()
 
             # render frame directly either to screen backbuffer or PsychoPy's FBO
-            t5a = perf_counter()
+            t6a = perf_counter()
             ctx.render(
                 # opengl_fbo=self._target_fbo_info, flip_y=True, block_for_target_time=False
                 opengl_fbo=self._intermediate_fbo_info,
                 flip_y=True,
                 block_for_target_time=False,
             )
-            t5b = perf_counter()
+            t6b = perf_counter()
 
             # restore viewport
-            t6a = perf_counter()
+            t7a = perf_counter()
             gl.glViewport(*viewport)
-            t6b = perf_counter()
+            t7b = perf_counter()
         else:
-            t3b = perf_counter()
-            t4a = t4b = t5a = t5b = t6a = t6b = 0
+            t5a = t5b = t6a = t6b = t7a = t7b = 0
 
         # blit to screen backbuffer
-        t7a = perf_counter()
+        t8a = perf_counter()
         sw, sh = self._intermediate_fbo_info["w"], self._intermediate_fbo_info["h"]
         tw, th = self._target_fbo_info["w"], self._target_fbo_info["h"]
         utils.test_blit(
@@ -425,7 +431,7 @@ class MpvMoviestim:
             self._intermediate_fbo_info["fbo"],
             self._target_fbo_info["fbo"],
         )
-        t7b = perf_counter()
+        t8b = perf_counter()
 
         timings[0] = t1b - t1a
         timings[1] = t2b - t2a
@@ -434,6 +440,7 @@ class MpvMoviestim:
         timings[4] = t5b - t5a
         timings[5] = t6b - t6a
         timings[6] = t7b - t7a
+        timings[7] = t8b - t8a
 
     def report_swap(self) -> None:
         if self._report_swap_on_next:
