@@ -1,6 +1,3 @@
-# trying to render into intermediate FBO, then blit immmediately to screen
-# may need fence/sync
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -87,7 +84,6 @@ def main() -> None:
         file=test_options.VIDEO_FILE,
         noAudio=not test_options.mpv_enable_audio,
         autoStart=False,
-        block=True,
     )
 
     # player.preroll()
@@ -113,16 +109,16 @@ def main() -> None:
         instructions.draw()
 
         t1 = perf_counter()
-        row[6] = t1 - t0
+        row[-1] = t1 - t0
         times[n] = row
+        player.report_swap()
         win.flip()
         n += 1
 
     frame_intervals = np.array(win.frameIntervals)
     n = min(n, frame_intervals.shape[0], times.shape[0])
-    times = times[:n]
-    times[:, 7] = frame_intervals[:n]
-    times *= 1000
+    times = times[:n] * 1000
+    frame_intervals = frame_intervals[:n] * 1000
 
     player.stop()
     win.close()
@@ -139,30 +135,35 @@ def main() -> None:
         "backup viewport",
         "render",
         "restore viewport",
+        "blit",
         "external",
-        "frame interval",
     ]
     bottom = np.zeros(n)
-    for i in range(6):  # columns 0..5
+    for i in range(7):  # columns 0..5
         ax.bar(x, times[:, i], bottom=bottom, label=labels[i])
         bottom += times[:, i]
 
     # --- Line plots ---
-    ax.plot(x, times[:, 6], color="black", linewidth=2, label="external")
-    ax.plot(x, times[:, 7], color="red", linewidth=2, label="frame interval")
+    ax.plot(x, times[:, 7], color="black", linewidth=2, label="external")
+    ax.plot(x, frame_intervals, color="red", linewidth=2, label="frame interval")
 
     # --- Styling ---
     ax.set_xlabel("Frame")
     ax.set_ylabel("Time (ms)")
     ax.set_title("Stacked Bar + Line Plot")
+    ax.set_ylim(0, np.max(frame_intervals[2:]) * 1.1)
     ax.legend(loc="upper left", bbox_to_anchor=(1.02, 1.0))
     ax.grid(True, axis="y", linestyle="--", alpha=0.4)
 
     # for each column in times, calculate mean value for rows >=2
     # print out the result using labels, e.g. column 0, label0
     for i in range(times.shape[1]):
-        mean_value = np.mean(times[2:, i])
-        print(f"{labels[i]}: {mean_value:.3f} ms")
+        d = times[2:, i]
+        print(f"{labels[i]}: {np.mean(d):.3f} ({np.min(d):.2f}-{np.max(d):.2f}) ms")
+    print(
+        f"frame intervals: {np.mean(frame_intervals):.3f} "
+        f"({np.min(frame_intervals)}-{np.max(frame_intervals)}) ms"
+    )
 
     plt.tight_layout()
     plt.show()

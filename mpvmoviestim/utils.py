@@ -218,7 +218,7 @@ def create_texture(w: int, h: int, internal_format: int = gl.GL_RGBA8) -> int:
     if label == "":
         raise ValueError(f"Unknown incoming format {hex(internal_format)}")
 
-    logging.debug(f"Generating GL texture with format {label}")
+    logging.debug(f"Allocating GL texture with format {label}")
 
     # Allocate storage
     gl.glTexImage2D(
@@ -457,8 +457,8 @@ def test_blit(
     src_size: tuple[int, int],
     dst_rect: tuple[int, int, int, int],
     win_size: tuple[int, int],
-    # src_fbo: int,
-    # draw_fbo: int,
+    src_fbo: int,
+    draw_fbo: int,
 ) -> None:
     """
     do blit (for testing pre-blit calculation performance)
@@ -490,8 +490,8 @@ def test_blit(
     )
 
     # Bind FBOs
-    # gl.glBindFramebuffer(gl.GL_READ_FRAMEBUFFER, src_fbo)
-    # gl.glBindFramebuffer(gl.GL_DRAW_FRAMEBUFFER, draw_fbo)
+    gl.glBindFramebuffer(gl.GL_READ_FRAMEBUFFER, src_fbo)
+    gl.glBindFramebuffer(gl.GL_DRAW_FRAMEBUFFER, draw_fbo)
 
     # Draw
     gl.glBlitFramebuffer(
@@ -508,8 +508,8 @@ def test_blit(
     )
 
     # Unbind FBOs
-    # gl.glBindFramebuffer(gl.GL_READ_FRAMEBUFFER, 0)
-    # gl.glBindFramebuffer(gl.GL_DRAW_FRAMEBUFFER, 0)
+    gl.glBindFramebuffer(gl.GL_READ_FRAMEBUFFER, 0)
+    gl.glBindFramebuffer(gl.GL_DRAW_FRAMEBUFFER, 0)
 
 
 def windows_set_scaling_aware() -> None:
