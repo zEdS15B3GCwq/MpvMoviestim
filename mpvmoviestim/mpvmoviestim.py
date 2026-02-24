@@ -7,7 +7,7 @@ import ctypes
 import functools
 from enum import Enum, auto
 from pathlib import Path
-from time import perf_counter, sleep
+from time import perf_counter
 from typing import TYPE_CHECKING
 
 import mpv
@@ -125,7 +125,7 @@ class MpvMoviestim:
         # "idle": True,  # do not quit when there is no file to play
         "pause": True,  # start paused
         # "wid": 0,  # do not create a new window (implied by other settings)
-        "keepaspect": False,
+        # "keepaspect": False,
     }
     _mpv_default_audio_options: dict[str, Any] = {
         "volume": 100,  # set volume to 100%
@@ -147,8 +147,10 @@ class MpvMoviestim:
         file: Path | str,
         autoStart: bool = False,
         noAudio: bool = False,
-        volume: int | float = 100,
+        volume: float = 1.0,
         mpv_options: dict[str, Any] | None = None,
+        pos: tuple[int | float, int | float] = (0, 0),
+        size: tuple[int | float, int | float] | None = None,
     ):
         # combine default options with user options, and add log handler
         self._mpv_options = self._mpv_default_options.copy()
@@ -158,7 +160,9 @@ class MpvMoviestim:
             self._mpv_options["ao"] = "null"
         else:
             self._mpv_options.update(self._mpv_default_audio_options)
-            self._mpv_options["volume"] = volume
+            self._mpv_options["volume"] = (
+                0 if volume < 0 else 100 if volume > 1 else int(volume * 100)
+            )
 
         if mpv_options is not None:
             self._mpv_options.update(mpv_options)
@@ -357,6 +361,7 @@ class MpvMoviestim:
     #     self._player.command("frame-step", "1")
 
     def draw(self, timings, frameinfo) -> None:
+        t0 = perf_counter()
         # don't use guard wrapper for performance reasons
         if self._player_state != MpvState.PLAYING:
             logging.warning(
@@ -364,64 +369,50 @@ class MpvMoviestim:
             )
             return
 
-        t1a = perf_counter()
         if self._threaded_mode:
             raise NotImplementedError("Threaded mode not implemented yet.")
 
         ctx = self._mpv_render_ctx
         if ctx is None:
             raise RuntimeError("render context is None")
-        t1b = perf_counter()
+        timings[0] = perf_counter() - t0
 
-        # ctx.report_swap()
-
-        # if self._report_swap_on_next:
-        #     # t2a = perf_counter()
-        #     # ctx.report_swap()
-        #     self._report_swap_on_next = False
-        #     # t2b = perf_counter()
-        #     t2a = 0
-        #     t2b = 0.005
-        # else:
-        t2a = t2b = 0
-
-        t3a = perf_counter()
+        t0 = perf_counter()
         update = ctx.update()
-        t3b = perf_counter()
+        timings[1] = perf_counter() - t0
 
-        t4a = perf_counter()
-        finfo = ctx.next_frame_info
-        frameinfo.update(finfo)
-        t4b = perf_counter()
+        t0 = perf_counter()
+        mpv._mpv_render_context_get_info(ctx._handle, frameinfo)  # pylint: disable=E1101,W0212  # type: ignore
+        timings[2] = perf_counter() - t0
 
         if update:
             self._report_swap_on_next = True
 
             # save current viewport
-            t5a = perf_counter()
+            t0 = perf_counter()
             viewport = (ctypes.c_int * 4)()
             gl.glGetIntegerv(gl.GL_VIEWPORT, viewport)
-            t5b = perf_counter()
+            timings[3] = perf_counter() - t0
 
             # render frame directly either to screen backbuffer or PsychoPy's FBO
-            t6a = perf_counter()
+            t0 = perf_counter()
             ctx.render(
                 # opengl_fbo=self._target_fbo_info, flip_y=True, block_for_target_time=False
                 opengl_fbo=self._intermediate_fbo_info,
                 flip_y=True,
                 block_for_target_time=False,
             )
-            t6b = perf_counter()
+            timings[4] = perf_counter() - t0
 
             # restore viewport
-            t7a = perf_counter()
+            t0 = perf_counter()
             gl.glViewport(*viewport)
-            t7b = perf_counter()
+            timings[5] = perf_counter() - t0
         else:
-            t5a = t5b = t6a = t6b = t7a = t7b = 0
+            timings[3:6] = 0
 
         # blit to screen backbuffer
-        t8a = perf_counter()
+        t0 = perf_counter()
         sw, sh = self._intermediate_fbo_info["w"], self._intermediate_fbo_info["h"]
         tw, th = self._target_fbo_info["w"], self._target_fbo_info["h"]
         utils.test_blit(
@@ -431,16 +422,7 @@ class MpvMoviestim:
             self._intermediate_fbo_info["fbo"],
             self._target_fbo_info["fbo"],
         )
-        t8b = perf_counter()
-
-        timings[0] = t1b - t1a
-        timings[1] = t2b - t2a
-        timings[2] = t3b - t3a
-        timings[3] = t4b - t4a
-        timings[4] = t5b - t5a
-        timings[5] = t6b - t6a
-        timings[6] = t7b - t7a
-        timings[7] = t8b - t8a
+        timings[6] = perf_counter() - t0
 
     def report_swap(self) -> None:
         if self._report_swap_on_next:

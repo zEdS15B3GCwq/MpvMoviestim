@@ -10,6 +10,7 @@ import numpy as np
 import pyglet
 from matplotlib import pyplot as plt
 from psychopy import logging, visual
+from psychopy.visual import vlcmoviestim
 
 from mpvmoviestim import mpvmoviestim, utils
 
@@ -83,80 +84,47 @@ def main() -> None:
     )
     win.recordFrameIntervals = True
 
-    player = mpvmoviestim.MpvMoviestim(
-        window=win,
-        file=test_options.VIDEO_FILE,
+    player = vlcmoviestim.VlcMovieStim(
+        win,
+        filename=str(test_options.VIDEO_FILE),
         noAudio=not test_options.mpv_enable_audio,
         autoStart=False,
+        size=(window_size[0], window_size[1]),
+        pos=(0, 0),
     )
 
     # player.preroll()
 
-    # Create instruction text
-    instructions = visual.TextStim(
-        win,
-        text="Press SPACE to toggle pause\nPress ESC or Q to quit",
-        pos=(0, 2160 // 2 - 40),
-        height=20,
-        color="white",
-        units="pix",
-    )
+    # # Create instruction text
+    # instructions = visual.TextStim(
+    #     win,
+    #     text="Press SPACE to toggle pause\nPress ESC or Q to quit",
+    #     pos=(0, 2160 // 2 - 40),
+    #     height=20,
+    #     color="white",
+    #     units="pix",
+    # )
 
-    player.play(block=True)
-    row = np.zeros((8,), dtype=np.float64)
-    times = np.zeros((1000, 8), dtype=np.float64)
-    frame_info_target_times = np.zeros((1000,), dtype=np.int64)
-    frame_info_flags = np.zeros((1000,), dtype=np.int64)
-    finfo_param = mpv.MpvRenderParam("next_frame_info", {})
-    n = 0
-    while n < times.shape[0]:
+    times = np.zeros((500,), dtype=np.float64)
+
+    player.play()
+    for i in range(500):
         t0 = perf_counter()
-        player.draw(row, finfo_param)
-
-        instructions.draw()
-
-        finfo: mpv.MpvRenderFrameInfo = cast(mpv.MpvRenderFrameInfo, finfo_param.value)
-        frame_info_target_times[n] = finfo.target_time
-        frame_info_flags[n] = finfo.flags
-
-        t1 = perf_counter()
-        row[-1] = t1 - t0
-        times[n] = row
-
+        player.draw()
+        times[i] = perf_counter() - t0
         win.flip()
-        player.report_swap()
-        n += 1
-
-    frame_intervals = np.array(win.frameIntervals)
-    n = min(n, frame_intervals.shape[0], times.shape[0])
-    times = times[:n] * 1000
-    frame_intervals = frame_intervals[:n] * 1000
 
     player.stop()
     win.close()
 
-    x = np.arange(n)
+    frame_intervals = np.array(win.frameIntervals)
+    frame_intervals *= 1000
 
     fig, ax = plt.subplots(figsize=(10, 6))
 
-    # --- Stacked bar plot ---
-    labels = [
-        "checks",
-        "update",
-        "frame_info",
-        "backup viewport",
-        "render",
-        "restore viewport",
-        "blit",
-        "external",
-    ]
-    bottom = np.zeros(n)
-    for i in range(7):
-        ax.bar(x, times[:, i], bottom=bottom, label=labels[i])
-        bottom += times[:, i]
-
-    # --- Line plots ---
-    ax.plot(x, times[:, 7], color="black", linewidth=2, label="external")
+    x = np.arange(times.size)
+    ax.plot(x, times, color="black", linewidth=2, label="draw")
+    x = np.arange(frame_intervals.size)
     ax.plot(x, frame_intervals, color="red", linewidth=2, label="frame interval")
 
     # --- Styling ---
@@ -166,21 +134,6 @@ def main() -> None:
     ax.set_ylim(0, np.max(frame_intervals[2:]) * 1.1)
     ax.legend(loc="upper left", bbox_to_anchor=(1.02, 1.0))
     ax.grid(True, axis="y", linestyle="--", alpha=0.4)
-
-    # for each column in times, calculate mean value for rows >=2
-    # print out the result using labels, e.g. column 0, label0
-    for i in range(times.shape[1]):
-        d = times[2:, i]
-        print(f"{labels[i]}: {np.mean(d):.3f} ({np.min(d):.2f}-{np.max(d):.2f}) ms")
-    print(
-        f"frame intervals: {np.mean(frame_intervals):.3f} "
-        f"({np.min(frame_intervals)}-{np.max(frame_intervals)}) ms"
-    )
-
-    print(frame_info_target_times[:100])
-    print(frame_info_flags[:100])
-    print(np.diff(frame_info_target_times[:101]))
-    print(np.diff(frame_info_target_times[1:101:2]))
 
     plt.tight_layout()
     plt.show()

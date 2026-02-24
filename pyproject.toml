@@ -11,8 +11,12 @@ dependencies = [
 ]
 
 [[tool.mypy.overrides]]
-module = ["pyglet.*", "psychopy.*", "mpv.*"]
+module = ["pyglet.*", "psychopy.*"]
 follow_untyped_imports = true
+
+[[tool.mypy.overrides]]
+module = ["mpv.*"]
+ignore_missing_imports = true
 
 [tool.pyright]
 pythonVersion = "3.9"
