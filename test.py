@@ -103,8 +103,8 @@ def main() -> None:
     )
 
     player.play(block=True)
-    row = np.zeros((8,), dtype=np.float64)
-    times = np.zeros((1000, 8), dtype=np.float64)
+    row = np.zeros((6,), dtype=np.float64)
+    times = np.zeros((1000, 6), dtype=np.float64)
     frame_info_target_times = np.zeros((1000,), dtype=np.int64)
     frame_info_flags = np.zeros((1000,), dtype=np.int64)
     finfo_param = mpv.MpvRenderParam("next_frame_info", {})
@@ -141,17 +141,15 @@ def main() -> None:
 
     # --- Stacked bar plot ---
     labels = [
-        "checks",
-        "update",
-        "frame_info",
-        "backup viewport",
-        "render",
-        "restore viewport",
+        "lock",
+        "wait on worker",
+        "wait on fence",
         "blit",
+        "set fence",
         "external",
     ]
     bottom = np.zeros(n)
-    for i in range(7):
+    for i, label in enumerate(labels):
         ax.bar(x, times[:, i], bottom=bottom, label=labels[i])
         bottom += times[:, i]
 

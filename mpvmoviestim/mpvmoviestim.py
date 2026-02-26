@@ -22,6 +22,7 @@ from .pixel_format_probe import get_psychopy_target_pixel_format
 if TYPE_CHECKING:
     from typing import Any, Callable
 
+    import numpy as np
     from pyglet.window import BaseWindow
 
 # these are possible performance tweaks
@@ -107,6 +108,18 @@ def state_guard(
     return decorator
 
 
+@dataclasses.dataclass
+class Profiling:
+    n: int
+    main_times: np.ndarray
+    worker_times: np.ndarray
+    worker_frame_times: np.ndarray
+    worker_frame_flags: np.ndarray
+    finfo_param: mpv.MpvRenderParam
+    i_main: int = 0
+    i_worker: int = 0
+
+
 class MpvState(Enum):
     UNKNOWN = auto()
     SHUTDOWN = auto()  # MPV player core has shut down after quit()
@@ -136,6 +149,7 @@ class ThreadingState:
     worker_thread: threading.Thread | None = None
     shadow_window: BaseWindow | None = None
     intermediate_fbos: tuple[dict[str, int], dict[str, int]] | None = None
+    intermediate_fbo_textures: tuple[int, int] | None = None
 
 
 class MpvMoviestim:
@@ -252,14 +266,17 @@ class MpvMoviestim:
             logging.error(f"Failed to initialize MPV player: {e}")
             raise
 
-    def _make_one_intermediate_fbo(self) -> dict[str, int]:
+    def _make_one_intermediate_fbo(self) -> tuple[dict[str, int], int]:
         """Allocate one intermediate FBO + backing texture on the current GL context.
 
         Must be called while the shadow (worker) context is current.
 
         Returns
         -------
-        dict with keys ``fbo``, ``tex``, ``w``, ``h``, ``internal_format``.
+        dict[str, int]
+            fbo info
+        int
+            texture id
         """
         w = self._target_fbo_info["w"]
         h = self._target_fbo_info["h"]
@@ -268,13 +285,12 @@ class MpvMoviestim:
         fbo_id = utils.create_fbo(tex_id)
         info: dict[str, int] = {
             "fbo": fbo_id,
-            "tex": tex_id,
             "w": w,
             "h": h,
             "internal_format": internal_format,
         }
-        logging.info(f"Intermediate FBO created: {info}")
-        return info
+        logging.info(f"Intermediate FBO created: {info}. texture: {tex_id}")
+        return info, tex_id
 
     # ------------------------------------------------------------------
     # Worker thread
@@ -311,8 +327,7 @@ class MpvMoviestim:
         # Log which renderer this context sees (sanity check that sharing works).
         renderer = gl.glGetString(gl.GL_RENDERER)
         logging.info(
-            f"MPV render worker: GL_RENDERER = "
-            f"{renderer.decode() if renderer else '<unknown>'}"
+            f"MPV render worker: GL_RENDERER = {renderer if renderer else '<unknown>'}"
         )
 
         self._mpv_render_ctx = mpv.MpvRenderContext(
@@ -325,9 +340,15 @@ class MpvMoviestim:
         self._mpv_render_ctx.update_cb = self._mpv_update_callback
 
         # Double-buffered intermediate FBOs (created on the shadow context).
+        fbo1, tex1 = self._make_one_intermediate_fbo()
+        fbo2, tex2 = self._make_one_intermediate_fbo()
         ts.intermediate_fbos = (
-            self._make_one_intermediate_fbo(),
-            self._make_one_intermediate_fbo(),
+            fbo1,
+            fbo2,
+        )
+        ts.intermediate_fbo_textures = (
+            tex1,
+            tex2,
         )
         ts.worker_fbo_idx = 0
         ts.present_fbo_idx = -1  # no frame ready yet
@@ -386,10 +407,12 @@ class MpvMoviestim:
 
         # --- cleanup (shadow context still current on this thread) ---
         self._mpv_render_ctx.free()
+        if ts.intermediate_fbo_textures is not None:
+            for tex in ts.intermediate_fbo_textures:
+                utils.destroy_texture(tex)
         if ts.intermediate_fbos is not None:
             for fbo in ts.intermediate_fbos:
                 utils.destroy_fbo(fbo["fbo"])
-                utils.destroy_texture(fbo["tex"])
         utils.release_context()
 
     def _mpv_log_fn(self, level: int, prefix: str, text: str) -> None:
@@ -529,7 +552,6 @@ class MpvMoviestim:
         the worker thread.  This method is CPU-fast: it only issues a
         GPU-side fence wait and a framebuffer blit.
         """
-        t0 = perf_counter()
         # Don't use the guard wrapper here for performance reasons.
         if self._player_state != MpvState.PLAYING:
             logging.warning(
@@ -540,6 +562,7 @@ class MpvMoviestim:
         ts = self._threading_state
 
         # Read the index of the most recently completed worker frame.
+        t0 = perf_counter()
         with ts.fbo_lock:
             present_idx = ts.present_fbo_idx
             worker_is_rendering = ts.worker_is_rendering
@@ -547,24 +570,24 @@ class MpvMoviestim:
 
         if worker_is_rendering:
             # Worker is mid-render: CPU-wait so we get the newest frame this cycle.
-            # t0 = perf_counter()
+            t0 = perf_counter()
             ts.worker_render_done.wait()  # no timeout; GPU serializes after this
             with ts.fbo_lock:
                 present_idx = ts.present_fbo_idx
-            timings[0] += perf_counter() - t0
+            timings[1] += perf_counter() - t0
 
         if present_idx == -1:
             logging.error(
                 "draw() called but no frame has been rendered yet — nothing to blit."
             )
-            timings[1:] = 0
+            timings[2:] = 0
             return
 
         if ts.intermediate_fbos is None:
             logging.error(
                 "draw() called but intermediate FBOs are not initialized — nothing to blit."
             )
-            timings[1:] = 0
+            timings[2:] = 0
             return
 
         fbo_info = ts.intermediate_fbos[present_idx]
@@ -577,15 +600,16 @@ class MpvMoviestim:
             gl.glWaitSync(render_fence, 0, gl.GL_TIMEOUT_IGNORED)
             gl.glDeleteSync(render_fence)
             ts.render_fences[present_idx] = None
-        timings[1] = perf_counter() - t0
+        timings[2] = perf_counter() - t0
 
         # Snapshot NEXT_FRAME_INFO while we have a frame available.
-        t0 = perf_counter()
-        mpv._mpv_render_context_get_info(  # pylint: disable=E1101,W0212  # type: ignore
-            self._mpv_render_ctx._handle,
-            frameinfo,  # pylint: disable=W0212
-        )
-        timings[2] = perf_counter() - t0
+        # move this to worker
+        # t0 = perf_counter()
+        # mpv._mpv_render_context_get_info(  # pylint: disable=E1101,W0212  # type: ignore
+        #     self._mpv_render_ctx._handle,
+        #     frameinfo,  # pylint: disable=W0212
+        # )
+        # timings[3] = perf_counter() - t0
 
         # Blit intermediate FBO → PsychoPy's target FBO.
         t0 = perf_counter()
