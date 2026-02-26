@@ -1,4 +1,4 @@
-# working: direct render into backbuffer, correct fbo, <2ms render time at 4k144
+# direct render into backbuffer, correct fbo, <2ms render time at 4k144
 
 from __future__ import annotations
 

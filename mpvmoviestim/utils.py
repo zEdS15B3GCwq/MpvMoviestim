@@ -3,9 +3,10 @@ from __future__ import annotations
 
 import ctypes
 import importlib
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pyglet
+import pyglet.window
 from psychopy import logging
 from pyglet import gl
 
@@ -510,6 +511,88 @@ def test_blit(
     # Unbind FBOs
     gl.glBindFramebuffer(gl.GL_READ_FRAMEBUFFER, 0)
     gl.glBindFramebuffer(gl.GL_DRAW_FRAMEBUFFER, 0)
+
+
+def create_shadow_window(main_window: Any) -> Any:
+    """Create an invisible pyglet window that shares *main_window*'s OpenGL context.
+
+    Parameters
+    ----------
+    main_window : pyglet.window.BaseWindow
+        The primary pyglet window whose context the shadow window will share.
+        When called from PsychoPy code, pass ``psychopy_win.winHandle``.
+
+    Returns
+    -------
+    pyglet.window.BaseWindow
+        The hidden shadow window.  Keep a reference to prevent GC.
+    """
+
+    # This doesn't work with pyglet 1.4/1.5 - create_context() fails
+    # platform = pyglet.window.get_platform()
+    # display = platform.get_default_display()
+    # screen = display.get_default_screen()
+    # template = pyglet.gl.Config()
+    # config = screen.get_best_config(template)
+    # shared_context = config.create_context(share=main_window.context)
+    # shadow = pyglet.window.Window(
+    #     width=1, height=1, visible=False, context=shared_context
+    # )
+
+    shadow_window = pyglet.window.Window(width=100, height=100, visible=False)
+
+    # is this necessary to hand-off context?
+    shadow_window.switch_to()
+    gl.current_context = None
+
+    # Restore the main window's context as current on this thread (shadow
+    # window's __init__ made its own context current).
+    main_window.switch_to()
+    main_window.activate()
+    gl.current_context = main_window.context
+
+    return shadow_window
+
+
+def make_context_current(window: Any) -> None:
+    """Make *window*'s OpenGL context current on the calling thread.
+
+    Safe to call from any thread.  Uses pyglet's canonical ``switch_to()``
+    which maps to ``wglMakeCurrent`` on Windows and ``glXMakeCurrent`` on
+    Linux.
+
+    Parameters
+    ----------
+    window : pyglet.window.BaseWindow
+        Window whose context should become current.
+    """
+    window.switch_to()
+
+
+def release_context() -> None:
+    """Release the current OpenGL context on the calling thread.
+
+    Calls the appropriate platform-specific unbind function.  Safe to call
+    even if no context is current (errors are swallowed).
+    """
+    platform = pyglet.compat_platform
+    if platform in ("win32", "cygwin"):
+        try:
+            from pyglet.gl import wgl  # pylint: disable=import-outside-toplevel
+
+            wgl.wglMakeCurrent(None, None)
+        except Exception:  # pylint: disable=broad-except
+            pass
+    elif platform.startswith("linux"):
+        try:
+            from pyglet.gl import glx  # pylint: disable=import-outside-toplevel
+
+            ctx = pyglet.gl.current_context
+            if ctx is not None:
+                glx.glXMakeCurrent(ctx._display, 0, None)
+        except Exception:  # pylint: disable=broad-except
+            pass
+    # macOS: NSOpenGLContext.clearCurrentContext() — not required for our use-case
 
 
 def windows_set_scaling_aware() -> None:
