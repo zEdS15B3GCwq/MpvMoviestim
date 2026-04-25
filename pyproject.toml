@@ -1,7 +1,7 @@
 [project]
 name = "mpvmoviestim"
 version = "0.1.0"
-description = "LibMPV-based moviestim class for PsychoPy, capable of 4K100+ hardware-accelerated playback"
+description = "LibMPV-based moviestim class for PsychoPy"
 readme = "README.md"
 requires-python = ">=3.9"
 dependencies = [
