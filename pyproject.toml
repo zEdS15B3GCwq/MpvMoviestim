@@ -3,12 +3,19 @@ name = "mpvmoviestim"
 version = "0.1.0"
 description = "LibMPV-based moviestim class for PsychoPy"
 readme = "README.md"
+authors = [
+    { name = "Tamas Fehervari", email = "58502181+zEdS15B3GCwq@users.noreply.github.com" }
+]
 requires-python = ">=3.10"
 dependencies = [
     "mpv>=1.0.8",
     "pyglet>=1.4,<2",
     "psychopy>=2025.2.4",
 ]
+
+[build-system]
+requires = ["uv_build>=0.11.8,<0.12.0"]
+build-backend = "uv_build"
 
 [[tool.mypy.overrides]]
 module = ["pyglet.*", "psychopy.*"]
