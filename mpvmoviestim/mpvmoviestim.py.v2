@@ -188,7 +188,7 @@ class MpvMoviestim:
             self._player = mpv.MPV(**self._mpv_options)  # type: ignore
             # self.player.observe_property("frame-drop-count", self._on_drop)
             self._player.observe_property("eof-reached", self._on_eof)
-            # self._player.register_event_callback(self._on_event)
+            # self..register_event__playercallback(self._on_event)
 
             # setup OpenGL context
             self._c_getproc = mpv.MpvGlGetProcAddressFn(utils.get_proc_address)
@@ -247,7 +247,7 @@ class MpvMoviestim:
         # eof-reached -> False when playback starts
         # eof-reached -> True at EOF
         # with keep-open set, player pauses instead of closing file
-        print(f"on eof: property {prop_name} changed to {value}")
+        # print(f"on eof: property {prop_name} changed to {value}")
         if value:  # and prop_name == "eof-reached"  # no need
             logging.exp("EOF reached")
             self._player_state = MpvState.IDLE
@@ -293,7 +293,6 @@ class MpvMoviestim:
         #     self._player_state = MpvState.PAUSED
         self._player.loadfile(filename=str(file), mode="replace")
         self._loaded_movie = file
-        # if block:
         self._player.wait_until_paused()
         self._player_state = MpvState.PAUSED
 
@@ -373,8 +372,8 @@ class MpvMoviestim:
     #     self._player.command("frame-step", "1")
 
     def draw(self, timings, frameinfo) -> None:
-        t0 = perf_counter()
         # don't use guard wrapper for performance reasons
+        t0 = perf_counter()
         if self._player_state != MpvState.PLAYING:
             logging.warning(
                 f"Cannot draw(), expected PLAYING state, got {self._player_state.name}."

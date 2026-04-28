@@ -121,9 +121,10 @@ class MpvMoviestim:
         "hwdec": "auto-safe",  # automatically choose H/W decoding pipeline
         "gpu_api": "opengl",  # use OpenGL API
         "keep-open": True,  # pause when reaching the end of the current file
-        "idle": True,  # do not quit when there is no file to play
+        # "idle": True,  # do not quit when there is no file to play
         "pause": True,  # start paused
-        "wid": 0,  # do not create a new window (implied by other settings)
+        # "wid": 0,  # do not create a new window (implied by other settings)
+        # "keepaspect": False,
     }
     _mpv_default_audio_options: dict[str, Any] = {
         "volume": 100,  # set volume to 100%
@@ -143,9 +144,10 @@ class MpvMoviestim:
         file: Path | str,
         autoStart: bool = False,
         noAudio: bool = False,
-        volume: int | float = 100,
+        volume: float = 1.0,
         mpv_options: dict[str, Any] | None = None,
-        block: bool = False,
+        pos: tuple[int | float, int | float] = (0, 0),
+        size: tuple[int | float, int | float] | None = None,
     ):
         # combine default options with user options, and add log handler
         self._mpv_options = self._mpv_default_options.copy()
@@ -155,7 +157,9 @@ class MpvMoviestim:
             self._mpv_options["ao"] = "null"
         else:
             self._mpv_options.update(self._mpv_default_audio_options)
-            self._mpv_options["volume"] = volume
+            self._mpv_options["volume"] = (
+                0 if volume < 0 else 100 if volume > 1 else int(volume * 100)
+            )
 
         if mpv_options is not None:
             self._mpv_options.update(mpv_options)
@@ -171,7 +175,7 @@ class MpvMoviestim:
             raise NotImplementedError("Threaded mode not implemented yet.")
         else:
             self._init_mpv_player()
-            self.loadMovie(file, block)
+            self.loadMovie(file)
 
     @log_pre_post
     @state_guard(allowed_state=MpvState.UNKNOWN)
@@ -181,6 +185,7 @@ class MpvMoviestim:
             self._player = mpv.MPV(**self._mpv_options)  # type: ignore
             # self.player.observe_property("frame-drop-count", self._on_drop)
             self._player.observe_property("eof-reached", self._on_eof)
+            # self..register_event__playercallback(self._on_event)
 
             # setup OpenGL context
             self._c_getproc = mpv.MpvGlGetProcAddressFn(utils.get_proc_address)
@@ -220,6 +225,7 @@ class MpvMoviestim:
         # eof-reached -> False when playback starts
         # eof-reached -> True at EOF
         # with keep-open set, player pauses instead of closing file
+        # print(f"on eof: property {prop_name} changed to {value}")
         if value:  # and prop_name == "eof-reached"  # no need
             logging.exp("EOF reached")
             self._player_state = MpvState.IDLE
@@ -228,9 +234,19 @@ class MpvMoviestim:
         print(f"Frame dropped. Property {prop_name} changed to {value}")
         # TODO
 
+    # def _on_event(self, event) -> None:
+    #     if event == mpv.MpvEventID.SHUTDOWN:
+    #         self._on_shutdown()
+
+    # @log_pre_post
+    # def _on_shutdown(self) -> None:
+    #     print("MPV shutdown")
+    #     logging.info("on shutdown called")
+    #     self._player_state = MpvState.SHUTDOWN
+
     @log_pre_post
     @state_guard(forbidden_state=[MpvState.UNKNOWN, MpvState.SHUTDOWN])
-    def loadMovie(self, file: Path | str, block: bool = True) -> None:
+    def loadMovie(self, file: Path | str) -> None:
         # TODO figure out: how to implement autoStart, can pause=True be set here?
         if isinstance(file, str):
             file = Path(file)
@@ -251,15 +267,21 @@ class MpvMoviestim:
         #     self._player_state = MpvState.PAUSED
         self._player.loadfile(filename=str(file), mode="replace")
         self._loaded_movie = file
-        if block:
-            self._player.wait_until_paused()
+        self._player.wait_until_paused()
         self._player_state = MpvState.PAUSED
+
+        self._player.wait_for_property("video-params")
+        video_params = self._player.video_params
+        self._media_size: tuple[int, int] = video_params["w"], video_params["h"]  # type: ignore
+
+        # self._blit_fn = utils.get_blit_fn
+
         logging.exp(f"Loaded movie '{file}' with autostart set to {self._autostart}.")
         if self._autostart:
-            self.play(block)
+            self.play()
 
-    def load(self, fileName: Path | str, block: bool = False) -> None:
-        self.loadMovie(fileName, block)
+    def load(self, fileName: Path | str) -> None:
+        self.loadMovie(fileName)
 
     @log_pre_post
     @state_guard(allowed_state=MpvState.PAUSED)
@@ -282,13 +304,32 @@ class MpvMoviestim:
 
     @log_pre_post
     @state_guard(allowed_state=[MpvState.PAUSED, MpvState.PLAYING])
-    def stop(self, block: bool = False) -> None:
+    def stop(self) -> None:
         # TODO: check if it's really core-idle afterwards or mpv shuts down
+
+        # One lurking issue worth flagging: stop() calls
+        # self._player.wait_for_shutdown() on the main thread. During shutdown,
+        # MPV internally tries to drain the render context — it waits for
+        # ctx.render() to be called one final time to cleanly terminate the
+        # video chain. If the worker is blocked on threading.Event.wait() at
+        # that moment and nothing wakes it, shutdown will stall (not deadlock
+        # permanently, but it will hang until you explicitly signal the stop
+        # event to the worker first). The teardown sequence must therefore:
+        # signal the worker stop event → join the worker thread → then call
+        # wait_for_shutdown().
+
+        self._player_state = MpvState.SHUTDOWN
+        print(f"frame-drop-count: {self._player.frame_drop_count}")
         self._player.stop()
-        if block:
-            self._player.wait_for_property("idle-active", timeout=5, catch_errors=True)
-        self._player_state = MpvState.IDLE
-        logging.exp(f"State change: {self._player_state.name} -> IDLE")
+        # self._player.terminate()
+        # self._player.wait_for_shutdown()
+        # self._player.stop()
+        # if block:
+        print("idle-active wait")
+        self._player.wait_for_property("idle-active")
+        self._player.quit()
+        print("shutdown wait")
+        self._player.wait_for_shutdown()
 
     # @log_pre_post
     # @state_guard(allowed_state=MpvState.PAUSED)
@@ -300,64 +341,54 @@ class MpvMoviestim:
     #     # self._player.volume = vol
     #     self._player.command("frame-step", "1")
 
-    def draw(self, timings) -> None:
-        # don't use log wrapper for performance reasons
+    def draw(self, timings, frameinfo) -> None:
+        # don't use guard wrapper for performance reasons
+        t0 = perf_counter()
         if self._player_state != MpvState.PLAYING:
             logging.warning(
                 f"Cannot draw(), expected PLAYING state, got {self._player_state.name}."
             )
             return
 
-        t1a = perf_counter()
         if self._threaded_mode:
             raise NotImplementedError("Threaded mode not implemented yet.")
 
         ctx = self._mpv_render_ctx
         if ctx is None:
             raise RuntimeError("render context is None")
-        t1b = perf_counter()
+        timings[0] = perf_counter() - t0
 
-        # ctx.report_swap()
+        t0 = perf_counter()
+        update = ctx.update()
+        timings[1] = perf_counter() - t0
 
-        # if self._report_swap_on_next:
-        #     # t2a = perf_counter()
-        #     # ctx.report_swap()
-        #     self._report_swap_on_next = False
-        #     # t2b = perf_counter()
-        #     t2a = 0
-        #     t2b = 0.005
-        # else:
-        t2a = t2b = 0
+        t0 = perf_counter()
+        mpv._mpv_render_context_get_info(ctx._handle, frameinfo)  # pylint: disable=E1101,W0212  # type: ignore
+        timings[2] = perf_counter() - t0
 
-        t3a = perf_counter()
-        if ctx.update():
+        if update:
             self._report_swap_on_next = True
-        t3b = perf_counter()
 
-        # save current viewport
-        t4a = perf_counter()
-        viewport = (ctypes.c_int * 4)()
-        gl.glGetIntegerv(gl.GL_VIEWPORT, viewport)
-        t4b = perf_counter()
+        if True:
+            # save current viewport
+            t0 = perf_counter()
+            viewport = (ctypes.c_int * 4)()
+            gl.glGetIntegerv(gl.GL_VIEWPORT, viewport)
+            timings[3] = perf_counter() - t0
 
-        # render frame directly either to screen backbuffer or PsychoPy's FBO
-        t5a = perf_counter()
-        ctx.render(
-            opengl_fbo=self._target_fbo_info, flip_y=True, block_for_target_time=False
-        )
-        t5b = perf_counter()
+            # render frame directly either to screen backbuffer or PsychoPy's FBO
+            t0 = perf_counter()
+            ctx.render(
+                opengl_fbo=self._target_fbo_info,
+                flip_y=True,
+                block_for_target_time=False,
+            )
+            timings[4] = perf_counter() - t0
 
-        # restore viewport
-        t6a = perf_counter()
-        gl.glViewport(*viewport)
-        t6b = perf_counter()
-
-        timings[0] = t1b - t1a
-        timings[1] = t2b - t2a
-        timings[2] = t3b - t3a
-        timings[3] = t4b - t4a
-        timings[4] = t5b - t5a
-        timings[5] = t6b - t6a
+            # restore viewport
+            t0 = perf_counter()
+            gl.glViewport(*viewport)
+            timings[5] = perf_counter() - t0
 
     @property
     def state(self) -> MpvState:
@@ -368,10 +399,10 @@ class MpvMoviestim:
         # TODO: test
         if not hasattr(self, "_player") or self._player is None:
             return MpvState.UNKNOWN
-        if self._player.pause:
-            return MpvState.PAUSED
         if self._player.core_shutdown:
             return MpvState.SHUTDOWN
+        if self._player.pause:
+            return MpvState.PAUSED
         if self._player.idle_active:
             return MpvState.IDLE
         if not self._player.core_idle:
