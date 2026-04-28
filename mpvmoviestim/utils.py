@@ -526,18 +526,13 @@ def create_shadow_window(main_window: Any) -> Any:
     -------
     pyglet.window.BaseWindow
         The hidden shadow window.  Keep a reference to prevent GC.
-    """
 
-    # This doesn't work with pyglet 1.4/1.5 - create_context() fails
-    # platform = pyglet.window.get_platform()
-    # display = platform.get_default_display()
-    # screen = display.get_default_screen()
-    # template = pyglet.gl.Config()
-    # config = screen.get_best_config(template)
-    # shared_context = config.create_context(share=main_window.context)
-    # shadow = pyglet.window.Window(
-    #     width=1, height=1, visible=False, context=shared_context
-    # )
+    Notes
+    -----
+    ``create_context()`` with shared context doesn't work with pyglet 1.4/1.5,
+    so we create a hidden window instead and rely on pyglet's internal context
+    sharing behavior.
+    """
 
     shadow_window = pyglet.window.Window(width=100, height=100, visible=False)
 
@@ -552,6 +547,17 @@ def create_shadow_window(main_window: Any) -> Any:
     gl.current_context = main_window.context
 
     return shadow_window
+
+    # This below doesn't work with pyglet 1.4/1.5 - create_context() fails
+    # platform = pyglet.window.get_platform()
+    # display = platform.get_default_display()
+    # screen = display.get_default_screen()
+    # template = pyglet.gl.Config()
+    # config = screen.get_best_config(template)
+    # shared_context = config.create_context(share=main_window.context)
+    # shadow = pyglet.window.Window(
+    #     width=1, height=1, visible=False, context=shared_context
+    # )
 
 
 def make_context_current(window: Any) -> None:
