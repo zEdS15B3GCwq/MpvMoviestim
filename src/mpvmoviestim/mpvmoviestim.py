@@ -132,6 +132,17 @@ class MpvState(Enum):
 class ThreadingState:
     """All threading and FBO-handoff state owned by the render worker."""
 
+    # Initialisation
+    worker_thread: threading.Thread | None = None
+    shadow_window: BaseWindow | None = None
+
+    # Double buffering
+    present_fbo_idx: int = -1
+    worker_fbo_idx: int = 0
+    intermediate_fbos: tuple[dict[str, int], dict[str, int]] | None = None
+    intermediate_fbo_textures: tuple[int, int] | None = None
+
+    # Triggers
     render_trigger: threading.Event = dataclasses.field(default_factory=threading.Event)
     stop_event: threading.Event = dataclasses.field(default_factory=threading.Event)
     worker_init_done: threading.Event = dataclasses.field(
@@ -140,16 +151,12 @@ class ThreadingState:
     worker_render_done: threading.Event = dataclasses.field(
         default_factory=threading.Event
     )
+
+    # Synchronisation
     fbo_lock: threading.Lock = dataclasses.field(default_factory=threading.Lock)
     render_fences: list[Any] = dataclasses.field(default_factory=lambda: [None, None])
     blit_fences: list[Any] = dataclasses.field(default_factory=lambda: [None, None])
-    present_fbo_idx: int = -1
-    worker_fbo_idx: int = 0
     worker_is_rendering: bool = False
-    worker_thread: threading.Thread | None = None
-    shadow_window: BaseWindow | None = None
-    intermediate_fbos: tuple[dict[str, int], dict[str, int]] | None = None
-    intermediate_fbo_textures: tuple[int, int] | None = None
 
 
 class MpvMoviestim:
