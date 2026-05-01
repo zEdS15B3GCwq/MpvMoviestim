@@ -509,6 +509,7 @@ def test_blit(
     )
 
     # Unbind FBOs
+    # TODO: this is incorrect! if the windows's useFBO is True, the target must not be 0
     gl.glBindFramebuffer(gl.GL_READ_FRAMEBUFFER, 0)
     gl.glBindFramebuffer(gl.GL_DRAW_FRAMEBUFFER, 0)
 

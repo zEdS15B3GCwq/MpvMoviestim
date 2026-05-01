@@ -403,6 +403,8 @@ class MpvMoviestim:
             ts.render_fences[target_idx] = gl.glFenceSync(
                 gl.GL_SYNC_GPU_COMMANDS_COMPLETE, 0
             )
+            # it appears that flushing after fencesync is expected (need to check spec)
+            gl.glFlush()
 
             # Hand off: publish which FBO is ready, clear rendering flag, flip index.
             with ts.fbo_lock:
