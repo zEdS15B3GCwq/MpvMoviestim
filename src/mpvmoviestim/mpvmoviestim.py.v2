@@ -350,7 +350,6 @@ class MpvMoviestim:
         # self._player.terminate()
         # self._player.wait_for_shutdown()
         # self._player.stop()
-        # if block:
         print("idle-active wait")
         self._player.wait_for_property("idle-active")
         self._player.quit()

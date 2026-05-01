@@ -478,13 +478,12 @@ class MpvMoviestim:
         #     self._player_state = MpvState.PAUSED
         self._player.loadfile(filename=str(file), mode="replace")
         self._loaded_movie = file
-        # if block:
         self._player.wait_until_paused()
         self._player_state = MpvState.PAUSED
 
         self._player.wait_for_property("video-params")
         video_params = self._player.video_params
-        self._media_size: tuple[int, int] = video_params["w"], video_params["h"]  # type:ignore
+        self._media_size: tuple[int, int] = video_params["w"], video_params["h"]  # type: ignore
 
         # self._blit_fn = utils.get_blit_fn
 
@@ -522,6 +521,9 @@ class MpvMoviestim:
 
         # Ask MPV to stop the current file and wait until it is idle.
         self._player.stop()
+        # self._player.terminate()
+        # self._player.wait_for_shutdown()
+        # self._player.stop()
         print("idle-active wait")
         self._player.wait_for_property("idle-active")
 
