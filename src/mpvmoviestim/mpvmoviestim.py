@@ -110,6 +110,7 @@ def state_guard(
 
 @dataclasses.dataclass
 class Profiling:
+    # TODO: check members
     n: int
     main_times: np.ndarray
     worker_times: np.ndarray
@@ -273,7 +274,7 @@ class MpvMoviestim:
             logging.error(f"Failed to initialize MPV player: {e}")
             raise
 
-    def _make_one_intermediate_fbo(self) -> tuple[dict[str, int], int]:
+    def _make_intermediate_fbo(self) -> tuple[dict[str, int], int]:
         """Allocate one intermediate FBO + backing texture on the current GL context.
 
         Must be called while the shadow (worker) context is current.
@@ -347,8 +348,8 @@ class MpvMoviestim:
         self._mpv_render_ctx.update_cb = self._mpv_update_callback
 
         # Double-buffered intermediate FBOs (created on the shadow context).
-        fbo1, tex1 = self._make_one_intermediate_fbo()
-        fbo2, tex2 = self._make_one_intermediate_fbo()
+        fbo1, tex1 = self._make_intermediate_fbo()
+        fbo2, tex2 = self._make_intermediate_fbo()
         ts.intermediate_fbos = (
             fbo1,
             fbo2,
