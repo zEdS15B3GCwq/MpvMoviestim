@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import ctypes
 import importlib
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import pyglet
 import pyglet.window
@@ -13,6 +13,7 @@ from pyglet import gl
 if TYPE_CHECKING:
     from collections.abc import Callable
     from types import ModuleType
+    from typing import Any
 
     from mpv import MpvRenderContext
 
@@ -490,6 +491,15 @@ def test_blit(
         gl.GL_NEAREST if ((sx1 - sx0) == cw and (sy1 - sy0) == ch) else gl.GL_LINEAR
     )
 
+    # FBO handling
+    # PsychoPy's strategy is to set the FBOs once, and use textured quad draws
+    # to it without setting them again.
+
+    # Save previously bound FBOs
+    previous_read_FBO = gl.glGetInteger(gl.GL_READ_FRAMEBUFFER_BINDING)
+    # Saving the draw FBO is unnecessary as we don't restore it
+    previous_draw_FBO = gl.glGetInteger(gl.GL_DRAW_FRAMEBUFFER_BINDING)
+
     # Bind FBOs
     gl.glBindFramebuffer(gl.GL_READ_FRAMEBUFFER, src_fbo)
     gl.glBindFramebuffer(gl.GL_DRAW_FRAMEBUFFER, draw_fbo)
@@ -508,10 +518,10 @@ def test_blit(
         filter_type,
     )
 
-    # Unbind FBOs
-    # TODO: this is incorrect! if the windows's useFBO is True, the target must not be 0
-    gl.glBindFramebuffer(gl.GL_READ_FRAMEBUFFER, 0)
-    gl.glBindFramebuffer(gl.GL_DRAW_FRAMEBUFFER, 0)
+    # Restore FBOs
+    gl.glBindFramebuffer(gl.GL_READ_FRAMEBUFFER, previous_read_FBO)
+    # Restoring the draw FBO is unnecessary as we use the same target as PsychoPy
+    # gl.glBindFramebuffer(gl.GL_DRAW_FRAMEBUFFER, previous_draw_FBO)
 
 
 def create_shadow_window(main_window: Any) -> Any:
@@ -526,26 +536,26 @@ def create_shadow_window(main_window: Any) -> Any:
     Returns
     -------
     pyglet.window.BaseWindow
-        The hidden shadow window.  Keep a reference to prevent GC.
+        The hidden shadow window. Keep a reference to prevent it being garbage collected.
 
     Notes
     -----
     ``create_context()`` with shared context doesn't work with pyglet 1.4/1.5,
-    so we create a hidden window instead and rely on pyglet's internal context
+    so we create a hidden window instead, and rely on pyglet's internal context
     sharing behavior.
     """
 
     shadow_window = pyglet.window.Window(width=100, height=100, visible=False)
 
     # is this necessary to hand-off context?
-    shadow_window.switch_to()
-    gl.current_context = None
+    # shadow_window.switch_to()  # redundant, already in Window.__init__()
+    # gl.current_context = None  # redundant, has no effect?
 
     # Restore the main window's context as current on this thread (shadow
     # window's __init__ made its own context current).
     main_window.switch_to()
     main_window.activate()
-    gl.current_context = main_window.context
+    # gl.current_context = main_window.context  # already set by switch_to()
 
     return shadow_window
 
@@ -564,9 +574,7 @@ def create_shadow_window(main_window: Any) -> Any:
 def make_context_current(window: Any) -> None:
     """Make *window*'s OpenGL context current on the calling thread.
 
-    Safe to call from any thread.  Uses pyglet's canonical ``switch_to()``
-    which maps to ``wglMakeCurrent`` on Windows and ``glXMakeCurrent`` on
-    Linux.
+    Alias of ``window.switch_to()``.
 
     Parameters
     ----------

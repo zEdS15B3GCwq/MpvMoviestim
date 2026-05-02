@@ -22,7 +22,6 @@ from .pixel_format_probe import get_psychopy_target_pixel_format
 if TYPE_CHECKING:
     from typing import Any, Callable
 
-    import numpy as np
     from pyglet.window import BaseWindow
 
 # these are possible performance tweaks
@@ -106,19 +105,6 @@ def state_guard(
         return wrapper
 
     return decorator
-
-
-@dataclasses.dataclass
-class Profiling:
-    # TODO: check members
-    n: int
-    main_times: np.ndarray
-    worker_times: np.ndarray
-    worker_frame_times: np.ndarray
-    worker_frame_flags: np.ndarray
-    finfo_param: mpv.MpvRenderParam
-    i_main: int = 0
-    i_worker: int = 0
 
 
 class MpvState(Enum):
@@ -461,6 +447,14 @@ class MpvMoviestim:
     @log_pre_post
     @state_guard(forbidden_state=[MpvState.UNKNOWN, MpvState.SHUTDOWN])
     def loadMovie(self, file: Path | str) -> None:
+        """Load a movie file into the player, replacing any currently loaded file.
+
+        Parameters
+        ----------
+        file : Path | str
+            Path to the movie file to load.
+
+        """
         # TODO figure out: how to implement autoStart, can pause=True be set here?
         if isinstance(file, str):
             file = Path(file)
@@ -495,6 +489,7 @@ class MpvMoviestim:
             self.play()
 
     def load(self, fileName: Path | str) -> None:
+        """Alias for loadMovie()"""
         self.loadMovie(fileName)
 
     @log_pre_post
@@ -557,12 +552,20 @@ class MpvMoviestim:
     #     # self._player.volume = vol
     #     self._player.command("frame-step", "1")
 
-    def draw(self, timings, frameinfo) -> None:
-        """Phase B — blit the latest worker-rendered frame to PsychoPy's FBO.
+    def draw(self) -> None:
+        """Blit the latest worker-rendered frame to PsychoPy's FBO.
 
-        Phase A (ctx.render to an intermediate FBO) runs asynchronously on
-        the worker thread.  This method is CPU-fast: it only issues a
-        GPU-side fence wait and a framebuffer blit.
+        This method should be called in PsychoPy's main render loop
+        to draw the current video frame onto the screen.
+
+        Notes
+        -----
+        * Video frames are rendered asynchronously by a separate
+        worker thread into double-buffered intermediate FBOs used
+        in this method for drawing.
+        * If ``self.profiling`` is True, this method also records
+        various timing metrics for performance analysis into
+        ``self.timings``.
         """
         # Don't use the guard wrapper here for performance reasons.
         if self._player_state != MpvState.PLAYING:
