@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 
 import mpv
 from psychopy import logging, visual
+from psychopy.gui.qtgui import _pr
 from pyglet import gl
 
 from . import utils
@@ -34,6 +35,9 @@ if TYPE_CHECKING:
 # "dither-depth": 8,  # mpv already selects this for rgba8 target
 # "dither": "fruit",  # already default
 # "audio_exclusive": "yes",
+
+
+__all__ = ["MpvMoviestim"]
 
 
 def log_pre_post(func: Callable[..., Any]) -> Callable[..., Any]:
@@ -57,15 +61,15 @@ def log_pre_post(func: Callable[..., Any]) -> Callable[..., Any]:
 
 
 def state_guard(
-    allowed_state: MpvState | list[MpvState] | None = None,
-    forbidden_state: MpvState | list[MpvState] | None = None,
+    allowed_state: PlayerState | list[PlayerState] | None = None,
+    forbidden_state: PlayerState | list[PlayerState] | None = None,
 ) -> Callable[[Callable[..., None]], Callable[..., None]]:
 
     allowed_states = (
         None
         if allowed_state is None
         else [allowed_state]
-        if isinstance(allowed_state, MpvState)
+        if isinstance(allowed_state, PlayerState)
         else allowed_state
     )
 
@@ -73,7 +77,7 @@ def state_guard(
         None
         if forbidden_state is None
         else [forbidden_state]
-        if isinstance(forbidden_state, MpvState)
+        if isinstance(forbidden_state, PlayerState)
         else forbidden_state
     )
 
@@ -107,7 +111,25 @@ def state_guard(
     return decorator
 
 
-class MpvState(Enum):
+_mpv_default_options: dict[str, Any] = {
+    "vo": "libmpv",  # render using the render_context API
+    "hwdec": "auto-safe",  # automatically choose H/W decoding pipeline
+    "gpu_api": "opengl",  # use OpenGL API
+    "keep-open": True,  # pause when reaching the end of the current file
+    # "idle": True,  # do not quit when there is no file to play
+    "pause": True,  # start paused
+    # "wid": 0,  # do not create a new window (implied by other settings)
+    # "keepaspect": False,
+}
+_mpv_default_audio_options: dict[str, Any] = {
+    "volume": 100,  # set volume to 100%
+    "volume_gain": 0,  # another way to set loudness
+    "audio_device": "auto",  # automatically choose audio output device
+    "audio-stream-silence": True,  # feeds ao silent audio even when paused
+}
+
+
+class PlayerState(Enum):
     UNKNOWN = auto()
     SHUTDOWN = auto()  # MPV player core has shut down after quit()
     IDLE = auto()  # MPV core is active, no file loaded
@@ -147,33 +169,25 @@ class ThreadingState:
 
 
 class MpvMoviestim:
-    _c_getproc: ctypes._CFunctionType
+    # PsychoPy
     _window: visual.Window
-    _player: mpv.MPV
-    _mpv_render_ctx: mpv.MpvRenderContext
-    _mpv_options: dict[str, Any]
-    _threading_state: ThreadingState
-
-    _mpv_default_options: dict[str, Any] = {
-        "vo": "libmpv",  # render using the render_context API
-        "hwdec": "auto-safe",  # automatically choose H/W decoding pipeline
-        "gpu_api": "opengl",  # use OpenGL API
-        "keep-open": True,  # pause when reaching the end of the current file
-        # "idle": True,  # do not quit when there is no file to play
-        "pause": True,  # start paused
-        # "wid": 0,  # do not create a new window (implied by other settings)
-        # "keepaspect": False,
-    }
-    _mpv_default_audio_options: dict[str, Any] = {
-        "volume": 100,  # set volume to 100%
-        "volume_gain": 0,  # another way to set loudness
-        "audio_device": "auto",  # automatically choose audio output device
-        "audio-stream-silence": True,  # feeds ao silent audio even when paused
-    }
-    _loaded_movie: Path | None = None
+    _position: tuple[int | float, int | float] | None
+    _size: tuple[int | float, int | float] | None
+    # Media
+    _loaded_movie: Path
     _autostart: bool
-    _player_state: MpvState
+    # Player core
+    _player_state: PlayerState = PlayerState.UNKNOWN
+    _threading_state: ThreadingState
+    _profiling: bool
+    _timings: list[list[float]]
+    # MPV and OpenGL
+    _player: mpv.MPV
+    _mpv_options: dict[str, Any]
+    _c_getproc: ctypes._CFunctionType
+    _mpv_render_ctx: mpv.MpvRenderContext
     _target_fbo_info: dict[str, int]  # mpv.MpvOpenGLFBO
+    _report_swap_on_next: bool = False
 
     def __init__(
         self,
@@ -185,15 +199,16 @@ class MpvMoviestim:
         mpv_options: dict[str, Any] | None = None,
         pos: tuple[int | float, int | float] = (0, 0),
         size: tuple[int | float, int | float] | None = None,
+        profiling: bool = False,
     ):
         # combine default options with user options, and add log handler
-        self._mpv_options = self._mpv_default_options.copy()
+        self._mpv_options = _mpv_default_options.copy()
         self._mpv_options.update({"log_handler": self._mpv_log_fn, "loglevel": "info"})
 
         if noAudio:
             self._mpv_options["ao"] = "null"
         else:
-            self._mpv_options.update(self._mpv_default_audio_options)
+            self._mpv_options.update(_mpv_default_audio_options)
             self._mpv_options["volume"] = (
                 0 if volume < 0 else 100 if volume > 1 else int(volume * 100)
             )
@@ -203,8 +218,9 @@ class MpvMoviestim:
 
         self._window = window
         self._autostart = autoStart
-        self._player_state = MpvState.UNKNOWN
-        self._report_swap_on_next = False
+        # self._player_state = PlayerState.UNKNOWN
+        # self._report_swap_on_next = False
+        self._profiling = profiling
 
         # Synchronisation primitives — must exist before worker thread starts.
         self._threading_state = ThreadingState()
@@ -213,7 +229,7 @@ class MpvMoviestim:
         self.loadMovie(file)
 
     @log_pre_post
-    @state_guard(allowed_state=MpvState.UNKNOWN)
+    @state_guard(allowed_state=PlayerState.UNKNOWN)
     def _init_mpv_player(self) -> None:
         # create MPV player instance
         try:
@@ -255,7 +271,7 @@ class MpvMoviestim:
             self._threading_state.worker_init_done.wait()  # block until worker is ready
 
             # set IDLE state, meaning core is active, file not loaded
-            self._player_state = MpvState.IDLE
+            self._player_state = PlayerState.IDLE
         except Exception as e:
             logging.error(f"Failed to initialize MPV player: {e}")
             raise
@@ -424,7 +440,7 @@ class MpvMoviestim:
         print(f"on eof: property {prop_name} changed to {value}")
         if value:  # and prop_name == "eof-reached"  # no need
             logging.exp("EOF reached")
-            self._player_state = MpvState.IDLE
+            self._player_state = PlayerState.IDLE
 
     def _on_drop(self, prop_name, value) -> None:
         print(f"Frame dropped. Property {prop_name} changed to {value}")
@@ -445,7 +461,7 @@ class MpvMoviestim:
     #         utils.destroy_fbo(self._intermediate_fbo_info["fbo"])
 
     @log_pre_post
-    @state_guard(forbidden_state=[MpvState.UNKNOWN, MpvState.SHUTDOWN])
+    @state_guard(forbidden_state=[PlayerState.UNKNOWN, PlayerState.SHUTDOWN])
     def loadMovie(self, file: Path | str) -> None:
         """Load a movie file into the player, replacing any currently loaded file.
 
@@ -476,7 +492,7 @@ class MpvMoviestim:
         self._player.loadfile(filename=str(file), mode="replace")
         self._loaded_movie = file
         self._player.wait_until_paused()
-        self._player_state = MpvState.PAUSED
+        self._player_state = PlayerState.PAUSED
 
         self._player.wait_for_property("video-params")
         video_params = self._player.video_params
@@ -493,28 +509,28 @@ class MpvMoviestim:
         self.loadMovie(fileName)
 
     @log_pre_post
-    @state_guard(allowed_state=MpvState.PAUSED)
+    @state_guard(allowed_state=PlayerState.PAUSED)
     def play(self, block: bool = False) -> None:
         self._report_swap_on_next = False
         self._player.pause = False
         if block:
             self._player.wait_until_playing()
-        self._player_state = MpvState.PLAYING
+        self._player_state = PlayerState.PLAYING
         logging.exp("State change: PAUSED -> PLAYING")
 
     @log_pre_post
-    @state_guard(allowed_state=MpvState.PLAYING)
+    @state_guard(allowed_state=PlayerState.PLAYING)
     def pause(self, block: bool = False) -> None:
         self._player.pause = True
         if block:
             self._player.wait_until_paused()
-        self._player_state = MpvState.PAUSED
+        self._player_state = PlayerState.PAUSED
         logging.exp("State change: PLAYING -> PAUSED")
 
     @log_pre_post
-    @state_guard(allowed_state=[MpvState.PAUSED, MpvState.PLAYING])
+    @state_guard(allowed_state=[PlayerState.PAUSED, PlayerState.PLAYING])
     def stop(self) -> None:
-        self._player_state = MpvState.SHUTDOWN
+        self._player_state = PlayerState.SHUTDOWN
         print(f"frame-drop-count: {self._player.frame_drop_count}")
 
         # Ask MPV to stop the current file and wait until it is idle.
@@ -568,7 +584,7 @@ class MpvMoviestim:
         ``self.timings``.
         """
         # Don't use the guard wrapper here for performance reasons.
-        if self._player_state != MpvState.PLAYING:
+        if self._player_state != PlayerState.PLAYING:
             logging.warning(
                 f"Cannot draw(), expected PLAYING state, got {self._player_state.name}."
             )
@@ -655,20 +671,20 @@ class MpvMoviestim:
             self._report_swap_on_next = False
 
     @property
-    def state(self) -> MpvState:
+    def state(self) -> PlayerState:
         return self._player_state
 
     @property
-    def _mpv_state(self) -> MpvState:
+    def _mpv_state(self) -> PlayerState:
         # TODO: test
         if not hasattr(self, "_player") or self._player is None:
-            return MpvState.UNKNOWN
+            return PlayerState.UNKNOWN
         if self._player.core_shutdown:
-            return MpvState.SHUTDOWN
+            return PlayerState.SHUTDOWN
         if self._player.pause:
-            return MpvState.PAUSED
+            return PlayerState.PAUSED
         if self._player.idle_active:
-            return MpvState.IDLE
+            return PlayerState.IDLE
         if not self._player.core_idle:
-            return MpvState.PLAYING
-        return MpvState.UNKNOWN
+            return PlayerState.PLAYING
+        return PlayerState.UNKNOWN
