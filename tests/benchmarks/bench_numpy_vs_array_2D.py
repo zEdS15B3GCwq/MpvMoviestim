@@ -2,7 +2,7 @@ import numpy as np
 from array import array
 from time import perf_counter
 
-N = 5000
+N = 500
 K = 20
 
 # -------------------------

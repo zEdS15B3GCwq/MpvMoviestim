@@ -5,7 +5,7 @@ from time import perf_counter
 # -------------------------
 # Benchmark parameters
 # -------------------------
-N = 5_000_000   # number of rows
+N = 500_000   # number of rows
 K = 20          # timings per row
 
 
@@ -30,8 +30,8 @@ for i in range(N):
     for j in range(K):
         row_np[j] = perf_counter()
     a[i] = row_np
-t_numpy = perf_counter() - t0 - perf_overhead
-print(f"numpy: {t_numpy}, {t_numpy / K / N}")
+t_numpy = perf_counter() - t0
+print(f"numpy: {t_numpy}, {t_numpy-perf_overhead}, {t_numpy / K / N}")
 
 
 # -------------------------
@@ -44,6 +44,6 @@ for i in range(N):
     base = i * K
     for j in range(K):
         b[base + j] = perf_counter()
-t_array = perf_counter() - t0 - perf_overhead
-print(f"array: {t_array}, {t_array / K / N}")
+t_array = perf_counter() - t0
+print(f"array: {t_array}, {t_array - perf_overhead}, {t_array / K / N}")
 
