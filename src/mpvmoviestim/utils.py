@@ -524,6 +524,64 @@ def test_blit(
     # gl.glBindFramebuffer(gl.GL_DRAW_FRAMEBUFFER, previous_draw_FBO)
 
 
+def test_blit_clip_no_resize(
+    src_size: tuple[int, int],
+    dst_rect: tuple[int, int, int, int],
+    win_size: tuple[int, int],
+    src_fbo: int,
+    draw_fbo: int,
+) -> None:
+    """
+    do blit (without any resizing or clip calculation)
+
+    OpenGL may be able to take care of clipping
+    Resizing should be unnecessary if FBO allocation is changed in a way
+    so that the largest possible size of texture is allocated and then
+    only a portion of it is used for drawing if the element is resized smaller.
+    """
+    dst_clipped = _intersect_screen_rect(win_size, dst_rect)
+    if dst_clipped is None:
+        return None
+
+    sw, sh = src_size
+    dx, dy, dw, dh = dst_rect
+
+    # source and dest are supposed to be the same size, use nearest for speed/sharpness
+    filter_type = gl.GL_NEAREST
+
+    # FBO handling
+    # PsychoPy's strategy is to set the FBOs once, and use textured quad draws
+    # to it without setting them again.
+
+    # Save previously bound FBOs
+    previous_read_FBO = gl.glGetInteger(gl.GL_READ_FRAMEBUFFER_BINDING)
+    # Saving the draw FBO is unnecessary as we don't restore it
+    # previous_draw_FBO = gl.glGetInteger(gl.GL_DRAW_FRAMEBUFFER_BINDING)
+
+    # Bind FBOs
+    gl.glBindFramebuffer(gl.GL_READ_FRAMEBUFFER, src_fbo)
+    gl.glBindFramebuffer(gl.GL_DRAW_FRAMEBUFFER, draw_fbo)
+
+    # Draw
+    gl.glBlitFramebuffer(
+        0,
+        0,
+        sw,
+        sh,
+        dx,
+        dy,
+        dx + dw,
+        dy + dh,
+        gl.GL_COLOR_BUFFER_BIT,
+        filter_type,
+    )
+
+    # Restore FBOs
+    gl.glBindFramebuffer(gl.GL_READ_FRAMEBUFFER, previous_read_FBO)
+    # Restoring the draw FBO is unnecessary as we use the same target as PsychoPy
+    # gl.glBindFramebuffer(gl.GL_DRAW_FRAMEBUFFER, previous_draw_FBO)
+
+
 def create_shadow_window(main_window: Any) -> Any:
     """Create an invisible pyglet window that shares *main_window*'s OpenGL context.
 

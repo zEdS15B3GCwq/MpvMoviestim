@@ -171,7 +171,7 @@ class ThreadingState:
 class MpvMoviestim:
     # PsychoPy
     _window: visual.Window
-    _position: tuple[int | float, int | float] | None
+    _position: tuple[int | float, int | float]
     _size: tuple[int | float, int | float] | None
     # Media
     _loaded_movie: Path
@@ -217,6 +217,8 @@ class MpvMoviestim:
             self._mpv_options.update(mpv_options)
 
         self._window = window
+        self._size = size
+        self._position = pos
         self._autostart = autoStart
         # self._player_state = PlayerState.UNKNOWN
         # self._report_swap_on_next = False
@@ -281,6 +283,13 @@ class MpvMoviestim:
 
         Must be called while the shadow (worker) context is current.
 
+        In order to avoid allocating FBOs/textures while playing the media, the
+        intermediate FBOs/textures allocated here will have a size that is the larger
+        of the target FBO (PsychoPy's rendering FBO or screen backbuffer) and the
+        specified size of the media element. Smaller display sizes can use these
+        surfaces without needing to allocate new FBOs/textures. Larger display sizes
+        are not supported.
+
         Returns
         -------
         dict[str, int]
@@ -288,8 +297,10 @@ class MpvMoviestim:
         int
             texture id
         """
-        w = self._target_fbo_info["w"]
-        h = self._target_fbo_info["h"]
+        target_w = self._target_fbo_info["w"]
+        target_h = self._target_fbo_info["h"]
+        w = max(target_w, self._size[0] if self._size is not None else 0)
+        h = max(target_h, self._size[1] if self._size is not None else 0)
         internal_format = self._target_fbo_info["internal_format"]
         tex_id = utils.create_texture(w, h, internal_format)
         fbo_id = utils.create_fbo(tex_id)
