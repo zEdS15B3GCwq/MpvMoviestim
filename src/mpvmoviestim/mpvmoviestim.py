@@ -14,7 +14,6 @@ from typing import TYPE_CHECKING
 
 import mpv
 from psychopy import logging, visual
-from psychopy.gui.qtgui import _pr
 from pyglet import gl
 
 from . import utils
@@ -172,6 +171,7 @@ class MpvMoviestim:
     # PsychoPy
     _window: visual.Window
     _position: tuple[int | float, int | float]
+    # if size is None, use media size in pixels (and ignore window units)
     _size: tuple[int | float, int | float] | None
     # Media
     _loaded_movie: Path
@@ -277,6 +277,14 @@ class MpvMoviestim:
         except Exception as e:
             logging.error(f"Failed to initialize MPV player: {e}")
             raise
+
+    def _calculate_position_and_size(
+        self,
+        size: tuple[int | float, int | float] | None,
+        position: tuple[int | float, int | float],
+    ) -> tuple[tuple[int, int], tuple[int, int]]:
+        # position is
+        return (0, 0), (0, 0)
 
     def _make_intermediate_fbo(self) -> tuple[dict[str, int], int]:
         """Allocate one intermediate FBO + backing texture on the current GL context.
