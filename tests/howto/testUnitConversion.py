@@ -9,6 +9,8 @@ def test_unit_conversion():
     win = Window(size=(800, 600), units="deg", monitor=mon)
     pix = convertToPix(pos=[0, 0], vertices=[[0, -10], [10, 10]], units="deg", win=win)
     print(pix)
+    pix = convertToPix(pos=[0, 0], vertices=[[-2, -2], [2, 2]], units="norm", win=win)
+    print(pix)
 
 
 if __name__ == "__main__":
