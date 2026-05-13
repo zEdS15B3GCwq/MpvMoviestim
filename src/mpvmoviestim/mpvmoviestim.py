@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 
 import mpv
 from psychopy import logging, visual
+from psychopy.tools.monitorunittools import convertToPix
 from pyglet import gl
 
 from . import utils
