@@ -1,6 +1,8 @@
 # trying to render into intermediate FBO, then blit immmediately to screen
 # may need fence/sync
 
+# TODO: verify if locks/fences are guaranteed to resolve at some time - need timeout?
+
 from __future__ import annotations
 
 import ctypes
@@ -41,6 +43,8 @@ __all__ = ["MpvMoviestim"]
 
 
 def log_pre_post(func: Callable[..., Any]) -> Callable[..., Any]:
+    """Decorator to log the player and MPV states before and after method execution."""
+
     @functools.wraps(func)
     def wrapper(*args, **kwargs) -> Any:
         instance: MpvMoviestim = args[0]
@@ -64,6 +68,7 @@ def state_guard(
     allowed_state: PlayerState | list[PlayerState] | None = None,
     forbidden_state: PlayerState | list[PlayerState] | None = None,
 ) -> Callable[[Callable[..., None]], Callable[..., None]]:
+    """Decorator to enforce allowed and forbidden states when running methods."""
 
     allowed_states = (
         None
@@ -130,7 +135,7 @@ _mpv_default_audio_options: dict[str, Any] = {
 
 
 class PlayerState(Enum):
-    UNKNOWN = auto()
+    UNSPECIFIED = auto()
     SHUTDOWN = auto()  # MPV player core has shut down after quit()
     IDLE = auto()  # MPV core is active, no file loaded
     PAUSED = auto()  # file loaded but not playing
@@ -141,7 +146,7 @@ class PlayerState(Enum):
 class ThreadingState:
     """All threading and FBO-handoff state owned by the render worker."""
 
-    # Initialisation
+    # Core objects
     worker_thread: threading.Thread | None = None
     shadow_window: BaseWindow | None = None
 
@@ -151,34 +156,32 @@ class ThreadingState:
     intermediate_fbos: tuple[dict[str, int], dict[str, int]] | None = None
     intermediate_fbo_textures: tuple[int, int] | None = None
 
-    # Triggers
+    # Synchronisation
     render_trigger: threading.Event = dataclasses.field(default_factory=threading.Event)
     stop_event: threading.Event = dataclasses.field(default_factory=threading.Event)
     worker_init_done: threading.Event = dataclasses.field(
         default_factory=threading.Event
     )
+    worker_is_rendering: bool = False
+    main_is_blitting: bool = False
     worker_render_done: threading.Event = dataclasses.field(
         default_factory=threading.Event
     )
-
-    # Synchronisation
     fbo_lock: threading.Lock = dataclasses.field(default_factory=threading.Lock)
     render_fences: list[Any] = dataclasses.field(default_factory=lambda: [None, None])
     blit_fences: list[Any] = dataclasses.field(default_factory=lambda: [None, None])
-    worker_is_rendering: bool = False
 
 
 class MpvMoviestim:
     # PsychoPy
     _window: visual.Window
     _position: tuple[int | float, int | float]
-    # if size is None, use media size in pixels (and ignore window units)
-    _size: tuple[int | float, int | float] | None
+    _size: tuple[int | float, int | float] | None  # media size in pix if None
     # Media
     _loaded_movie: Path
     _autostart: bool
     # Player core
-    _player_state: PlayerState = PlayerState.UNKNOWN
+    _player_state: PlayerState
     _threading_state: ThreadingState
     _profiling: bool
     _timings: list[list[float]]
@@ -188,7 +191,7 @@ class MpvMoviestim:
     _c_getproc: ctypes._CFunctionType
     _mpv_render_ctx: mpv.MpvRenderContext
     _target_fbo_info: dict[str, int]  # mpv.MpvOpenGLFBO
-    _report_swap_on_next: bool = False
+    _report_swap_on_next: bool
 
     def __init__(
         self,
@@ -221,8 +224,8 @@ class MpvMoviestim:
         self._size = size
         self._position = pos
         self._autostart = autoStart
-        # self._player_state = PlayerState.UNKNOWN
-        # self._report_swap_on_next = False
+        self._player_state = PlayerState.UNSPECIFIED
+        self._report_swap_on_next = False
         self._profiling = profiling
 
         # Synchronisation primitives — must exist before worker thread starts.
@@ -232,7 +235,7 @@ class MpvMoviestim:
         self.loadMovie(file)
 
     @log_pre_post
-    @state_guard(allowed_state=PlayerState.UNKNOWN)
+    @state_guard(allowed_state=PlayerState.UNSPECIFIED)
     def _init_mpv_player(self) -> None:
         # create MPV player instance
         try:
@@ -281,11 +284,53 @@ class MpvMoviestim:
 
     def _calculate_position_and_size(
         self,
-        size: tuple[int | float, int | float] | None,
+        size: tuple[int | float, int | float],
         position: tuple[int | float, int | float],
     ) -> tuple[tuple[int, int], tuple[int, int]]:
-        # position is
-        return (0, 0), (0, 0)
+        # calculate the media element's position and size in pixels
+        # position is always in window units, and is relative to the centre of the window
+        # position means the centre of the media element
+        # size, if given, is also in window units
+        # if size is None, use media size in pixels (and ignore window units)
+        # For OpenGL rendering, we need the bottom-left corner and the element size (w/h)
+        # in pixels. First, calculate the bottom-left and top-right corners in window units,
+        # then convert them to pixels using PsychoPy's `convertToPix` function.
+        # In `convertToPix`, set `pos` to [0,0] and provice the vertices as list[list[float, float]].
+        # The function calculates the vertex vectors relative to the position vector.
+        # Example: pix = convertToPix(pos=[0, 0], vertices=[[-1, -1], [1, 1]], units="norm", win=win)
+        # this calculates the bottom-left and top-right corners of the window in pixels.
+
+        win_units = self._window.units
+
+        if size is not None:
+            half_w = size[0] / 2
+            half_h = size[1] / 2
+            vertices = [
+                [position[0] - half_w, position[1] - half_h],
+                [position[0] + half_w, position[1] + half_h],
+            ]
+            corners_pix = convertToPix(
+                pos=[0, 0], vertices=vertices, units=win_units, win=self._window
+            )
+            bl = (int(corners_pix[0][0]), int(corners_pix[0][1]))
+            tr = (int(corners_pix[1][0]), int(corners_pix[1][1]))
+            size_pix = (tr[0] - bl[0], tr[1] - bl[1])
+        else:
+            # Use native media size in pixels; convert only the position
+            media_w = self._player.width or 0
+            media_h = self._player.height or 0
+            pos_pix = convertToPix(
+                pos=[0, 0],
+                vertices=[[position[0], position[1]]],
+                units=win_units,
+                win=self._window,
+            )
+            cx = int(pos_pix[0][0])
+            cy = int(pos_pix[0][1])
+            size_pix = (media_w, media_h)
+            bl = (cx - media_w // 2, cy - media_h // 2)
+
+        return bl, size_pix
 
     def _make_intermediate_fbo(self) -> tuple[dict[str, int], int]:
         """Allocate one intermediate FBO + backing texture on the current GL context.
@@ -481,7 +526,7 @@ class MpvMoviestim:
     #         utils.destroy_fbo(self._intermediate_fbo_info["fbo"])
 
     @log_pre_post
-    @state_guard(forbidden_state=[PlayerState.UNKNOWN, PlayerState.SHUTDOWN])
+    @state_guard(forbidden_state=[PlayerState.UNSPECIFIED, PlayerState.SHUTDOWN])
     def loadMovie(self, file: Path | str) -> None:
         """Load a movie file into the player, replacing any currently loaded file.
 
@@ -698,7 +743,7 @@ class MpvMoviestim:
     def _mpv_state(self) -> PlayerState:
         # TODO: test
         if not hasattr(self, "_player") or self._player is None:
-            return PlayerState.UNKNOWN
+            return PlayerState.UNSPECIFIED
         if self._player.core_shutdown:
             return PlayerState.SHUTDOWN
         if self._player.pause:
@@ -707,4 +752,4 @@ class MpvMoviestim:
             return PlayerState.IDLE
         if not self._player.core_idle:
             return PlayerState.PLAYING
-        return PlayerState.UNKNOWN
+        return PlayerState.UNSPECIFIED
