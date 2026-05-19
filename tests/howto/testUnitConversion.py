@@ -11,7 +11,12 @@ def test_unit_conversion():
     print(pix)
     pix = convertToPix(pos=[1, 0], vertices=[[-2, -2], [2, 2]], units="norm", win=win)
     print(pix)
-    pix = convertToPix(pos=[0, 0], vertices=[[-2, -2], [2, 2]], units="norm", win=win)
+    pix = convertToPix(
+        pos=[0.5, 0.5],
+        vertices=[[-0.5, -0.25], [0.5, 0.25], [0, 0]],
+        units="norm",
+        win=win,
+    )
     print(pix)
 
 

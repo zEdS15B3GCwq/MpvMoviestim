@@ -175,11 +175,12 @@ class ThreadingState:
 class MpvMoviestim:
     # PsychoPy
     _window: visual.Window
-    _position: tuple[int | float, int | float]
-    _size: tuple[int | float, int | float] | None  # media size in pix if None
+    _position: tuple[int | float, int | float]  # position in Psychopy units
+    _size: tuple[int | float, int | float] | None  # size in Psychopy units
     # Media
     _loaded_movie: Path
     _autostart: bool
+    _media_size: tuple[int, int] | None
     # Player core
     _player_state: PlayerState
     _threading_state: ThreadingState
@@ -188,6 +189,7 @@ class MpvMoviestim:
     # MPV and OpenGL
     _player: mpv.MPV
     _mpv_options: dict[str, Any]
+    _px_rect: tuple[int, int, int, int]  # presentation bounding rect in pix
     _c_getproc: ctypes._CFunctionType
     _mpv_render_ctx: mpv.MpvRenderContext
     _target_fbo_info: dict[str, int]  # mpv.MpvOpenGLFBO
@@ -223,10 +225,13 @@ class MpvMoviestim:
         self._window = window
         self._size = size
         self._position = pos
+        self._media_size = None
         self._autostart = autoStart
         self._player_state = PlayerState.UNSPECIFIED
         self._report_swap_on_next = False
         self._profiling = profiling
+
+        self._update_bounding_rect()
 
         # Synchronisation primitives — must exist before worker thread starts.
         self._threading_state = ThreadingState()
@@ -282,11 +287,8 @@ class MpvMoviestim:
             logging.error(f"Failed to initialize MPV player: {e}")
             raise
 
-    def _calculate_position_and_size(
-        self,
-        size: tuple[int | float, int | float],
-        position: tuple[int | float, int | float],
-    ) -> tuple[tuple[int, int], tuple[int, int]]:
+    def _update_bounding_rect(self) -> None:
+        """Update pixel-based bounding rectangle from Psychopy-based size and position."""
         # calculate the media element's position and size in pixels
         # position is always in window units, and is relative to the centre of the window
         # position means the centre of the media element
@@ -329,8 +331,6 @@ class MpvMoviestim:
             cy = int(pos_pix[0][1])
             size_pix = (media_w, media_h)
             bl = (cx - media_w // 2, cy - media_h // 2)
-
-        return bl, size_pix
 
     def _make_intermediate_fbo(self) -> tuple[dict[str, int], int]:
         """Allocate one intermediate FBO + backing texture on the current GL context.
