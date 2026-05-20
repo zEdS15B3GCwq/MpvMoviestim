@@ -302,9 +302,37 @@ class MpvMoviestim:
         # Example: pix = convertToPix(pos=[0, 0], vertices=[[-1, -1], [1, 1]], units="norm", win=win)
         # this calculates the bottom-left and top-right corners of the window in pixels.
 
-        win_units = self._window.units
+        if self._size is None:
+            if self._media_size is None:
+                logging.info(
+                    "Size not specified and media size not available yet, not updating bounding rect."
+                )
+                return
+            else:
+                centre_x, centre_y = self._window.size[0] / 2, self._window.size[1] / 2
+                if self._window.units == "pix":
+                    pos_x, pos_y = (
+                        int(centre_x + self._position[0]),
+                        int(centre_y + self._position[1]),
+                    )
+                else:
+                    centre_to_pos_vector = convertToPix(
+                        pos=[0, 0],
+                        vertices=[[self._position[0], self._position[1]]],
+                        units=self._window.units,
+                        win=self._window,
+                    )[0]
+                    pos_x, pos_y = (
+                        int(centre_x + centre_to_pos_vector[0]),
+                        int(centre_y + centre_to_pos_vector[1]),
+                    )
+                w, h = self._media_size
+                x, y = pos_x - w // 2, pos_y - h // 2
+                self._px_rect = (x, y, x + w, y + h)
+        else:
 
-        if size is not None:
+
+
             half_w = size[0] / 2
             half_h = size[1] / 2
             vertices = [
