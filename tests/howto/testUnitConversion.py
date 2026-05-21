@@ -7,17 +7,17 @@ def test_unit_conversion():
     mon = Monitor(name="mymonitor", distance=60, width=40)
     mon.setSizePix([3840, 2160])
     win = Window(size=(3840, 2160), units="deg", monitor=mon)
-    pix = convertToPix(pos=[0, 0], vertices=[[-1, -1], [1, 1]], units="norm", win=win)
+    pix = convertToPix(pos=[0, 0], vertices=[(1, 1)], units="norm", win=win)[0]
     print(pix)
-    pix = convertToPix(pos=[1, 0], vertices=[[-2, -2], [2, 2]], units="norm", win=win)
+    pix = convertToPix(pos=[1, 0], vertices=[(-2, -2), (2, 2)], units="norm", win=win)
     print(pix)
-    pix = convertToPix(
+    pixa, pixb, pixc = convertToPix(
         pos=[0.5, 0.5],
-        vertices=[[-0.5, -0.25], [0.5, 0.25], [0, 0]],
+        vertices=[(-0.5, -0.25), (0.5, 0.25), (0, 0)],
         units="norm",
         win=win,
     )
-    print(pix)
+    print(pixa, pixb, pixc)
 
 
 if __name__ == "__main__":

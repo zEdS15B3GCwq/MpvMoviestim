@@ -189,7 +189,7 @@ class MpvMoviestim:
     # MPV and OpenGL
     _player: mpv.MPV
     _mpv_options: dict[str, Any]
-    _px_rect: tuple[int, int, int, int]  # presentation bounding rect in pix
+    _bounding_rect_px: tuple[int, int, int, int]  # presentation bounding rect in pix
     _c_getproc: ctypes._CFunctionType
     _mpv_render_ctx: mpv.MpvRenderContext
     _target_fbo_info: dict[str, int]  # mpv.MpvOpenGLFBO
@@ -302,63 +302,121 @@ class MpvMoviestim:
         # Example: pix = convertToPix(pos=[0, 0], vertices=[[-1, -1], [1, 1]], units="norm", win=win)
         # this calculates the bottom-left and top-right corners of the window in pixels.
 
-        if self._size is None:
-            if self._media_size is None:
-                logging.info(
-                    "Size not specified and media size not available yet, not updating bounding rect."
+        if self._size is None and self._media_size is None:
+            logging.info(
+                "Size not specified and media size not available yet, not updating bounding rect."
+            )
+            return
+
+        # if units are not pix, convert what's necessary to pixels
+        if not self._window.units == "pix":
+            if self._size is not None:
+                vertices = [
+                    (
+                        self._position[0] - self._size[0] / 2,
+                        self._position[1] - self._size[1] / 2,
+                    ),
+                    (
+                        self._position[0] + self._size[0] / 2,
+                        self._position[1] + self._size[1] / 2,
+                    ),
+                ]
+                bottom_left_px, top_right_px = convertToPix(
+                    pos=[0, 0],
+                    vertices=vertices,
+                    units=self._window.units,
+                    win=self._window,
+                )
+                self._bounding_rect_px = (
+                    bottom_left_px[0],
+                    bottom_left_px[1],
+                    top_right_px[0],
+                    top_right_px[1],
                 )
                 return
             else:
-                centre_x, centre_y = self._window.size[0] / 2, self._window.size[1] / 2
-                if self._window.units == "pix":
-                    pos_x, pos_y = (
-                        int(centre_x + self._position[0]),
-                        int(centre_y + self._position[1]),
-                    )
-                else:
-                    centre_to_pos_vector = convertToPix(
-                        pos=[0, 0],
-                        vertices=[[self._position[0], self._position[1]]],
-                        units=self._window.units,
-                        win=self._window,
-                    )[0]
-                    pos_x, pos_y = (
-                        int(centre_x + centre_to_pos_vector[0]),
-                        int(centre_y + centre_to_pos_vector[1]),
-                    )
-                w, h = self._media_size
-                x, y = pos_x - w // 2, pos_y - h // 2
-                self._px_rect = (x, y, x + w, y + h)
-        else:
+                pos_px = convertToPix(
+                    pos=[0, 0],
+                    vertices=[self._position],
+                    units=self._window.units,
+                    win=self._window,
+                )[0]
 
+            pos_px = self._position
 
+            if self._size is not None:
+                half_w = self._size[0] / 2
+                half_h = self._size[1] / 2
+                self._bounding_rect_px = (
+                    int(self._position[0] - half_w),
+                    int(self._position[1] - half_h),
+                    int(self._position[0] + half_w),
+                    int(self._position[1] + half_h),
+                )
+            else:
+                # use media size in pixels
+                self._bounding_rect_px = (
+                    int(self._position[0] - self._media_size[0] / 2),
+                    int(self._position[1] - self._media_size[1] / 2),
+                    int(self._position[0] + self._media_size[0] / 2),
+                    int(self._position[1] + self._media_size[1] / 2),
+                )
 
-            half_w = size[0] / 2
-            half_h = size[1] / 2
-            vertices = [
-                [position[0] - half_w, position[1] - half_h],
-                [position[0] + half_w, position[1] + half_h],
-            ]
-            corners_pix = convertToPix(
-                pos=[0, 0], vertices=vertices, units=win_units, win=self._window
-            )
-            bl = (int(corners_pix[0][0]), int(corners_pix[0][1]))
-            tr = (int(corners_pix[1][0]), int(corners_pix[1][1]))
-            size_pix = (tr[0] - bl[0], tr[1] - bl[1])
-        else:
-            # Use native media size in pixels; convert only the position
-            media_w = self._player.width or 0
-            media_h = self._player.height or 0
-            pos_pix = convertToPix(
-                pos=[0, 0],
-                vertices=[[position[0], position[1]]],
-                units=win_units,
-                win=self._window,
-            )
-            cx = int(pos_pix[0][0])
-            cy = int(pos_pix[0][1])
-            size_pix = (media_w, media_h)
-            bl = (cx - media_w // 2, cy - media_h // 2)
+        # if self._size is None:
+        #     if self._media_size is None:
+        #         logging.info(
+        #             "Size not specified and media size not available yet, not updating bounding rect."
+        #         )
+        #         return
+        #     else:
+        #         centre_x, centre_y = self._window.size[0] / 2, self._window.size[1] / 2
+        #         if self._window.units == "pix":
+        #             pos_x, pos_y = (
+        #                 int(centre_x + self._position[0]),
+        #                 int(centre_y + self._position[1]),
+        #             )
+        #         else:
+        #             centre_to_pos_vector = convertToPix(
+        #                 pos=[0, 0],
+        #                 vertices=[[self._position[0], self._position[1]]],
+        #                 units=self._window.units,
+        #                 win=self._window,
+        #             )[0]
+        #             pos_x, pos_y = (
+        #                 int(centre_x + centre_to_pos_vector[0]),
+        #                 int(centre_y + centre_to_pos_vector[1]),
+        #             )
+        #         w, h = self._media_size
+        #         x, y = pos_x - w // 2, pos_y - h // 2
+        #         self._bounding_rect_px = (x, y, x + w, y + h)
+        # else:
+
+        #     half_w = size[0] / 2
+        #     half_h = size[1] / 2
+        #     vertices = [
+        #         [position[0] - half_w, position[1] - half_h],
+        #         [position[0] + half_w, position[1] + half_h],
+        #     ]
+        #     corners_pix = convertToPix(
+        #         pos=[0, 0], vertices=vertices, units=win_units, win=self._window
+        #     )
+        #     bl = (int(corners_pix[0][0]), int(corners_pix[0][1]))
+        #     tr = (int(corners_pix[1][0]), int(corners_pix[1][1]))
+        #     size_pix = (tr[0] - bl[0], tr[1] - bl[1])
+        # else:
+        #     # Use native media size in pixels; convert only the position
+        #     media_w = self._player.width or 0
+        #     media_h = self._player.height or 0
+        #     pos_pix = convertToPix(
+        #         pos=[0, 0],
+        #         vertices=[[position[0], position[1]]],
+        #         units=win_units,
+        #         win=self._window,
+        #     )
+        #     cx = int(pos_pix[0][0])
+        #     cy = int(pos_pix[0][1])
+        #     size_pix = (media_w, media_h)
+        #     bl = (cx - media_w // 2, cy - media_h // 2)
 
     def _make_intermediate_fbo(self) -> tuple[dict[str, int], int]:
         """Allocate one intermediate FBO + backing texture on the current GL context.
