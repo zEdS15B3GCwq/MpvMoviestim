@@ -189,7 +189,7 @@ class MpvMoviestim:
     # MPV and OpenGL
     _player: mpv.MPV
     _mpv_options: dict[str, Any]
-    _bounding_rect_px: tuple[int, int, int, int]  # presentation bounding rect in pix
+    _draw_rect_px: tuple[int, int, int, int] | None  # display rect (x, y, w, h)
     _c_getproc: ctypes._CFunctionType
     _mpv_render_ctx: mpv.MpvRenderContext
     _target_fbo_info: dict[str, int]  # mpv.MpvOpenGLFBO
@@ -226,12 +226,11 @@ class MpvMoviestim:
         self._size = size
         self._position = pos
         self._media_size = None
+        self._draw_rect_px = self.bounding_rect(size, self._media_size, pos, window)
         self._autostart = autoStart
         self._player_state = PlayerState.UNSPECIFIED
         self._report_swap_on_next = False
         self._profiling = profiling
-
-        self._update_bounding_rect()
 
         # Synchronisation primitives — must exist before worker thread starts.
         self._threading_state = ThreadingState()
@@ -287,7 +286,106 @@ class MpvMoviestim:
             logging.error(f"Failed to initialize MPV player: {e}")
             raise
 
-    def _update_bounding_rect(self) -> None:
+    # def _update_bounding_rect(self) -> None:
+    #     """Update pixel-based bounding rectangle from Psychopy-based size and position.
+
+    #     Notes
+    #     -----
+    #     - Psychopy's window size is in pixels; position and size can be in any Psychopy units
+    #     - Display position is relative to window centre
+    #     - All units other than pixels are converted using Psychopy's `convertToPix` function
+    #     - If dipslay size is not given, media size is used when available
+    #     - If neither size nor media size are available, the bounding rect is not updated
+    #     - Bounding rect = bottom-left and top-right corners in window pixels, needed for OpenGL blit
+    #     """
+
+    #     if self._size is None and self._media_size is None:
+    #         logging.info(
+    #             "Size not specified and media size not available yet, not updating bounding rect."
+    #         )
+    #         return
+    #     # The above guard is supposed to prevent both media size and size being None at the same time,
+    #     # but type checkers don't seem to understand this logic, so additional asserts were needed
+    #     # below to silence errors.
+
+    #     screen_centre_px: tuple[int, int] = (
+    #         self._window.size[0] / 2,
+    #         self._window.size[1] / 2,
+    #     )
+
+    #     # if units are not pix, convert to pixels what's necessary
+    #     if not self._window.units == "pix":
+    #         if self._size is not None:
+    #             # if display size is provided, calculate bounding rect directly
+    #             # get vectors from screen centre to bottom-left/top-right of media in pixels
+    #             # we directly calculate corner positions to allow for non-rectangular units
+    #             vertices = [
+    #                 (
+    #                     self._position[0] - self._size[0] / 2,
+    #                     self._position[1] - self._size[1] / 2,
+    #                 ),
+    #                 (
+    #                     self._position[0] + self._size[0] / 2,
+    #                     self._position[1] + self._size[1] / 2,
+    #                 ),
+    #             ]
+    #             bottom_left_px, top_right_px = cast(
+    #                 tuple[tuple[float, float], tuple[float, float]],
+    #                 convertToPix(
+    #                     pos=[0, 0],
+    #                     vertices=vertices,
+    #                     units=self._window.units,
+    #                     win=self._window,
+    #                 ),
+    #             )
+    #         else:
+    #             assert self._media_size is not None  # guaranteed, silences errors
+    #             # display size not provided, only convert position to px
+    #             # pos_px: screen centre -> media element centre vector in pixels
+    #             pos_px: tuple[float, float] = convertToPix(
+    #                 pos=[0, 0],
+    #                 vertices=[self._position],
+    #                 units=self._window.units,
+    #                 win=self._window,
+    #             )[0]
+    #             bottom_left_px = (
+    #                 pos_px[0] - self._media_size[0] / 2,
+    #                 pos_px[1] - self._media_size[1] / 2,
+    #             )
+    #             top_right_px = (
+    #                 pos_px[0] + self._media_size[0] / 2,
+    #                 pos_px[1] + self._media_size[1] / 2,
+    #             )
+    #         # bounding rect absolute coordinates = screen centre position +  corner vectors
+    #         self._bounding_rect_px = (
+    #             int(bottom_left_px[0] + screen_centre_px[0]),
+    #             int(bottom_left_px[1] + screen_centre_px[1]),
+    #             int(top_right_px[0] + screen_centre_px[0]),
+    #             int(top_right_px[1] + screen_centre_px[1]),
+    #         )
+    #         return
+    #     else:
+    #         # Everything is in pixels, we only need to decide what display size to use
+    #         pos_px = self._position
+    #         if self._size is None:
+    #             assert self._media_size is not None  # guaranteed, silences errors
+    #             size_px: tuple[int | float, int | float] = self._media_size
+    #         else:
+    #             size_px = self._size
+    #         self._bounding_rect = (
+    #             int(screen_centre_px[0] + pos_px[0] - size_px[0] / 2),
+    #             int(screen_centre_px[1] + pos_px[1] - size_px[1] / 2),
+    #             int(screen_centre_px[0] + pos_px[0] + size_px[0] / 2),
+    #             int(screen_centre_px[1] + pos_px[1] + size_px[1] / 2),
+    #         )
+
+    @staticmethod
+    def bounding_rect(
+        size: tuple[float, float] | None,
+        media_size: tuple[float, float] | None,
+        position: tuple[float, float],
+        window: visual.Window,
+    ) -> tuple[int, int, int, int] | None:
         """Update pixel-based bounding rectangle from Psychopy-based size and position.
 
         Notes
@@ -297,37 +395,37 @@ class MpvMoviestim:
         - All units other than pixels are converted using Psychopy's `convertToPix` function
         - If dipslay size is not given, media size is used when available
         - If neither size nor media size are available, the bounding rect is not updated
-        - Bounding rect = bottom-left and top-right corners in window pixels, needed for OpenGL blit
+        - Bounding rect = (x, y, w, h) in window pixels, needed for OpenGL blit
         """
 
-        if self._size is None and self._media_size is None:
+        if size is None and media_size is None:
             logging.info(
                 "Size not specified and media size not available yet, not updating bounding rect."
             )
-            return
+            return None
         # The above guard is supposed to prevent both media size and size being None at the same time,
         # but type checkers don't seem to understand this logic, so additional asserts were needed
         # below to silence errors.
 
         screen_centre_px: tuple[int, int] = (
-            self._window.size[0] / 2,
-            self._window.size[1] / 2,
+            window.size[0] / 2,
+            window.size[1] / 2,
         )
 
         # if units are not pix, convert to pixels what's necessary
-        if not self._window.units == "pix":
-            if self._size is not None:
+        if not window.units == "pix":
+            if size is not None:
                 # if display size is provided, calculate bounding rect directly
                 # get vectors from screen centre to bottom-left/top-right of media in pixels
                 # we directly calculate corner positions to allow for non-rectangular units
                 vertices = [
                     (
-                        self._position[0] - self._size[0] / 2,
-                        self._position[1] - self._size[1] / 2,
+                        position[0] - size[0] / 2,
+                        position[1] - size[1] / 2,
                     ),
                     (
-                        self._position[0] + self._size[0] / 2,
-                        self._position[1] + self._size[1] / 2,
+                        position[0] + size[0] / 2,
+                        position[1] + size[1] / 2,
                     ),
                 ]
                 bottom_left_px, top_right_px = cast(
@@ -335,50 +433,50 @@ class MpvMoviestim:
                     convertToPix(
                         pos=[0, 0],
                         vertices=vertices,
-                        units=self._window.units,
-                        win=self._window,
+                        units=window.units,
+                        win=window,
                     ),
                 )
             else:
-                assert self._media_size is not None  # guaranteed, silences errors
+                assert media_size is not None  # guaranteed, silences errors
                 # display size not provided, only convert position to px
                 # pos_px: screen centre -> media element centre vector in pixels
                 pos_px: tuple[float, float] = convertToPix(
                     pos=[0, 0],
-                    vertices=[self._position],
-                    units=self._window.units,
-                    win=self._window,
+                    vertices=[position],
+                    units=window.units,
+                    win=window,
                 )[0]
                 bottom_left_px = (
-                    pos_px[0] - self._media_size[0] / 2,
-                    pos_px[1] - self._media_size[1] / 2,
+                    pos_px[0] - media_size[0] / 2,
+                    pos_px[1] - media_size[1] / 2,
                 )
                 top_right_px = (
-                    pos_px[0] + self._media_size[0] / 2,
-                    pos_px[1] + self._media_size[1] / 2,
+                    pos_px[0] + media_size[0] / 2,
+                    pos_px[1] + media_size[1] / 2,
                 )
             # bounding rect absolute coordinates = screen centre position +  corner vectors
-            self._bounding_rect_px = (
+            bounding_rect = (
                 int(bottom_left_px[0] + screen_centre_px[0]),
                 int(bottom_left_px[1] + screen_centre_px[1]),
-                int(top_right_px[0] + screen_centre_px[0]),
-                int(top_right_px[1] + screen_centre_px[1]),
+                int(top_right_px[0] - bottom_left_px[0]),
+                int(top_right_px[1] - bottom_left_px[1]),
             )
-            return
         else:
             # Everything is in pixels, we only need to decide what display size to use
-            pos_px = self._position
-            if self._size is None:
-                assert self._media_size is not None  # guaranteed, silences errors
-                size_px: tuple[int | float, int | float] = self._media_size
+            pos_px = position
+            if size is None:
+                assert media_size is not None  # guaranteed, silences errors
+                size_px: tuple[int | float, int | float] = media_size
             else:
-                size_px = self._size
-            self._bounding_rect = (
+                size_px = size
+            bounding_rect = (
                 int(screen_centre_px[0] + pos_px[0] - size_px[0] / 2),
                 int(screen_centre_px[1] + pos_px[1] - size_px[1] / 2),
-                int(screen_centre_px[0] + pos_px[0] + size_px[0] / 2),
-                int(screen_centre_px[1] + pos_px[1] + size_px[1] / 2),
+                int(size_px[0]),
+                int(size_px[1]),
             )
+        return bounding_rect
 
     def _make_intermediate_fbo(self) -> tuple[dict[str, int], int]:
         """Allocate one intermediate FBO + backing texture on the current GL context.

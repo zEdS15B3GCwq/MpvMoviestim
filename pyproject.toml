@@ -27,3 +27,8 @@ ignore_missing_imports = true
 
 [tool.pyright]
 pythonVersion = "3.10"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+]
