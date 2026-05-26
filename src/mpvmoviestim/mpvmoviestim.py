@@ -12,7 +12,7 @@ import threading
 from enum import Enum, auto
 from pathlib import Path
 from time import perf_counter
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import mpv
 from psychopy import logging, visual
@@ -288,29 +288,38 @@ class MpvMoviestim:
             raise
 
     def _update_bounding_rect(self) -> None:
-        """Update pixel-based bounding rectangle from Psychopy-based size and position."""
-        # calculate the media element's position and size in pixels
-        # position is always in window units, and is relative to the centre of the window
-        # position means the centre of the media element
-        # size, if given, is also in window units
-        # if size is None, use media size in pixels (and ignore window units)
-        # For OpenGL rendering, we need the bottom-left corner and the element size (w/h)
-        # in pixels. First, calculate the bottom-left and top-right corners in window units,
-        # then convert them to pixels using PsychoPy's `convertToPix` function.
-        # In `convertToPix`, set `pos` to [0,0] and provice the vertices as list[list[float, float]].
-        # The function calculates the vertex vectors relative to the position vector.
-        # Example: pix = convertToPix(pos=[0, 0], vertices=[[-1, -1], [1, 1]], units="norm", win=win)
-        # this calculates the bottom-left and top-right corners of the window in pixels.
+        """Update pixel-based bounding rectangle from Psychopy-based size and position.
+
+        Notes
+        -----
+        - Psychopy's window size is in pixels; position and size can be in any Psychopy units
+        - Display position is relative to window centre
+        - All units other than pixels are converted using Psychopy's `convertToPix` function
+        - If dipslay size is not given, media size is used when available
+        - If neither size nor media size are available, the bounding rect is not updated
+        - Bounding rect = bottom-left and top-right corners in window pixels, needed for OpenGL blit
+        """
 
         if self._size is None and self._media_size is None:
             logging.info(
                 "Size not specified and media size not available yet, not updating bounding rect."
             )
             return
+        # The above guard is supposed to prevent both media size and size being None at the same time,
+        # but type checkers don't seem to understand this logic, so additional asserts were needed
+        # below to silence errors.
 
-        # if units are not pix, convert what's necessary to pixels
+        screen_centre_px: tuple[int, int] = (
+            self._window.size[0] / 2,
+            self._window.size[1] / 2,
+        )
+
+        # if units are not pix, convert to pixels what's necessary
         if not self._window.units == "pix":
             if self._size is not None:
+                # if display size is provided, calculate bounding rect directly
+                # get vectors from screen centre to bottom-left/top-right of media in pixels
+                # we directly calculate corner positions to allow for non-rectangular units
                 vertices = [
                     (
                         self._position[0] - self._size[0] / 2,
@@ -321,114 +330,65 @@ class MpvMoviestim:
                         self._position[1] + self._size[1] / 2,
                     ),
                 ]
-                bottom_left_px, top_right_px = convertToPix(
-                    pos=[0, 0],
-                    vertices=vertices,
-                    units=self._window.units,
-                    win=self._window,
+                bottom_left_px, top_right_px = cast(
+                    tuple[tuple[float, float], tuple[float, float]],
+                    convertToPix(
+                        pos=[0, 0],
+                        vertices=vertices,
+                        units=self._window.units,
+                        win=self._window,
+                    ),
                 )
-                self._bounding_rect_px = (
-                    bottom_left_px[0],
-                    bottom_left_px[1],
-                    top_right_px[0],
-                    top_right_px[1],
-                )
-                return
             else:
-                pos_px = convertToPix(
+                assert self._media_size is not None  # guaranteed, silences errors
+                # display size not provided, only convert position to px
+                # pos_px: screen centre -> media element centre vector in pixels
+                pos_px: tuple[float, float] = convertToPix(
                     pos=[0, 0],
                     vertices=[self._position],
                     units=self._window.units,
                     win=self._window,
                 )[0]
-
+                bottom_left_px = (
+                    pos_px[0] - self._media_size[0] / 2,
+                    pos_px[1] - self._media_size[1] / 2,
+                )
+                top_right_px = (
+                    pos_px[0] + self._media_size[0] / 2,
+                    pos_px[1] + self._media_size[1] / 2,
+                )
+            # bounding rect absolute coordinates = screen centre position +  corner vectors
+            self._bounding_rect_px = (
+                int(bottom_left_px[0] + screen_centre_px[0]),
+                int(bottom_left_px[1] + screen_centre_px[1]),
+                int(top_right_px[0] + screen_centre_px[0]),
+                int(top_right_px[1] + screen_centre_px[1]),
+            )
+            return
+        else:
+            # Everything is in pixels, we only need to decide what display size to use
             pos_px = self._position
-
-            if self._size is not None:
-                half_w = self._size[0] / 2
-                half_h = self._size[1] / 2
-                self._bounding_rect_px = (
-                    int(self._position[0] - half_w),
-                    int(self._position[1] - half_h),
-                    int(self._position[0] + half_w),
-                    int(self._position[1] + half_h),
-                )
+            if self._size is None:
+                assert self._media_size is not None  # guaranteed, silences errors
+                size_px: tuple[int | float, int | float] = self._media_size
             else:
-                # use media size in pixels
-                self._bounding_rect_px = (
-                    int(self._position[0] - self._media_size[0] / 2),
-                    int(self._position[1] - self._media_size[1] / 2),
-                    int(self._position[0] + self._media_size[0] / 2),
-                    int(self._position[1] + self._media_size[1] / 2),
-                )
-
-        # if self._size is None:
-        #     if self._media_size is None:
-        #         logging.info(
-        #             "Size not specified and media size not available yet, not updating bounding rect."
-        #         )
-        #         return
-        #     else:
-        #         centre_x, centre_y = self._window.size[0] / 2, self._window.size[1] / 2
-        #         if self._window.units == "pix":
-        #             pos_x, pos_y = (
-        #                 int(centre_x + self._position[0]),
-        #                 int(centre_y + self._position[1]),
-        #             )
-        #         else:
-        #             centre_to_pos_vector = convertToPix(
-        #                 pos=[0, 0],
-        #                 vertices=[[self._position[0], self._position[1]]],
-        #                 units=self._window.units,
-        #                 win=self._window,
-        #             )[0]
-        #             pos_x, pos_y = (
-        #                 int(centre_x + centre_to_pos_vector[0]),
-        #                 int(centre_y + centre_to_pos_vector[1]),
-        #             )
-        #         w, h = self._media_size
-        #         x, y = pos_x - w // 2, pos_y - h // 2
-        #         self._bounding_rect_px = (x, y, x + w, y + h)
-        # else:
-
-        #     half_w = size[0] / 2
-        #     half_h = size[1] / 2
-        #     vertices = [
-        #         [position[0] - half_w, position[1] - half_h],
-        #         [position[0] + half_w, position[1] + half_h],
-        #     ]
-        #     corners_pix = convertToPix(
-        #         pos=[0, 0], vertices=vertices, units=win_units, win=self._window
-        #     )
-        #     bl = (int(corners_pix[0][0]), int(corners_pix[0][1]))
-        #     tr = (int(corners_pix[1][0]), int(corners_pix[1][1]))
-        #     size_pix = (tr[0] - bl[0], tr[1] - bl[1])
-        # else:
-        #     # Use native media size in pixels; convert only the position
-        #     media_w = self._player.width or 0
-        #     media_h = self._player.height or 0
-        #     pos_pix = convertToPix(
-        #         pos=[0, 0],
-        #         vertices=[[position[0], position[1]]],
-        #         units=win_units,
-        #         win=self._window,
-        #     )
-        #     cx = int(pos_pix[0][0])
-        #     cy = int(pos_pix[0][1])
-        #     size_pix = (media_w, media_h)
-        #     bl = (cx - media_w // 2, cy - media_h // 2)
+                size_px = self._size
+            self._bounding_rect = (
+                int(screen_centre_px[0] + pos_px[0] - size_px[0] / 2),
+                int(screen_centre_px[1] + pos_px[1] - size_px[1] / 2),
+                int(screen_centre_px[0] + pos_px[0] + size_px[0] / 2),
+                int(screen_centre_px[1] + pos_px[1] + size_px[1] / 2),
+            )
 
     def _make_intermediate_fbo(self) -> tuple[dict[str, int], int]:
         """Allocate one intermediate FBO + backing texture on the current GL context.
 
         Must be called while the shadow (worker) context is current.
 
-        In order to avoid allocating FBOs/textures while playing the media, the
-        intermediate FBOs/textures allocated here will have a size that is the larger
-        of the target FBO (PsychoPy's rendering FBO or screen backbuffer) and the
-        specified size of the media element. Smaller display sizes can use these
-        surfaces without needing to allocate new FBOs/textures. Larger display sizes
-        are not supported.
+        We only allocate intermediate FBOs/textures once at the start of the worker thread
+        to avoid doing any GL resource allocation during playback. The size of the FBO
+        is the larger of the window size and the media display size. During playback, the
+        media can be resized to any size smaller than this, but not larger.
 
         Returns
         -------
@@ -437,10 +397,18 @@ class MpvMoviestim:
         int
             texture id
         """
-        target_w = self._target_fbo_info["w"]
-        target_h = self._target_fbo_info["h"]
-        w = max(target_w, self._size[0] if self._size is not None else 0)
-        h = max(target_h, self._size[1] if self._size is not None else 0)
+        w = max(
+            self._target_fbo_info["w"],
+            self._bounding_rect[2] - self._bounding_rect[0]
+            if self._bounding_rect is not None
+            else 0,
+        )
+        h = max(
+            self._target_fbo_info["h"],
+            self._bounding_rect[3] - self._bounding_rect[1]
+            if self._bounding_rect is not None
+            else 0,
+        )
         internal_format = self._target_fbo_info["internal_format"]
         tex_id = utils.create_texture(w, h, internal_format)
         fbo_id = utils.create_fbo(tex_id)
@@ -458,14 +426,13 @@ class MpvMoviestim:
     # ------------------------------------------------------------------
 
     def _mpv_update_callback(self) -> None:
-        """Called by MPV on its internal C thread when a new frame may be ready.
-
-        Body MUST be trivially fast — only set the event, nothing else.
-        """
+        """Called by MPV when a new frame may be ready."""
         self._threading_state.render_trigger.set()
 
     def _render_worker(self) -> None:
-        """Worker thread: owns the shadow GL context and MPV render context.
+        """Worker thread: render new frames into intermediate buffers
+
+        Owns the shadow GL context and MPV render context.
 
         Lifecycle
         ---------
