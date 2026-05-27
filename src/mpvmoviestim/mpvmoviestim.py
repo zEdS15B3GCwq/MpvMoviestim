@@ -228,7 +228,7 @@ class MpvMoviestim:
         self._size = size
         self._position = pos
         self._media_size = None
-        self._draw_rect = self.bounding_rect(size, self._media_size, pos, window)
+        self._draw_rect = self.bounding_rect(size, None, pos, window)
         self._autostart = autoStart
         self._player_state = PlayerState.UNSPECIFIED
         self._report_swap = False
@@ -629,9 +629,11 @@ class MpvMoviestim:
 
         self._player.wait_for_property("video-params")
         video_params = self._player.video_params
-        self._media_size: tuple[int, int] = video_params["w"], video_params["h"]  # type: ignore
-
-        # self._blit_fn = utils.get_blit_fn
+        self._media_size: tuple[int, int] = video_params["w"], video_params["h"]
+        if self._draw_rect is None:
+            self._draw_rect = self.bounding_rect(
+                self._size, self._media_size, self._position, self._window
+            )
 
         logging.exp(f"Loaded movie '{file}' with autostart set to {self._autostart}.")
         if self._autostart:
@@ -644,6 +646,7 @@ class MpvMoviestim:
     @_log_pre_post
     @_state_guard(allowed_state=PlayerState.PAUSED)
     def play(self, block: bool = False) -> None:
+        # TODO: threading state needs to be reset on play() following stop() or loadMovie()
         self._report_swap = False
         self._player.pause = False
         if block:
