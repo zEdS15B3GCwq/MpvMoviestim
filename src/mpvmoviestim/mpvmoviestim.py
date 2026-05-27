@@ -8,23 +8,24 @@ from __future__ import annotations
 import ctypes
 import dataclasses
 import functools
+import importlib
 import threading
 from enum import Enum, auto
 from pathlib import Path
 from time import perf_counter
+from types import ModuleType
 from typing import TYPE_CHECKING, cast
 
-import mpv
 from psychopy import logging, visual
 from psychopy.tools.monitorunittools import convertToPix
 from pyglet import gl
 
-from . import utils
-from .pixel_format_probe import get_psychopy_target_pixel_format
+from . import pixel_format, utils
 
 if TYPE_CHECKING:
     from typing import Any, Callable
 
+    import mpv
     from pyglet.window import BaseWindow
 
 # these are possible performance tweaks
@@ -42,7 +43,7 @@ if TYPE_CHECKING:
 __all__ = ["MpvMoviestim"]
 
 
-def log_pre_post(func: Callable[..., Any]) -> Callable[..., Any]:
+def _log_pre_post(func: Callable[..., Any]) -> Callable[..., Any]:
     """Decorator to log the player and MPV states before and after method execution."""
 
     @functools.wraps(func)
@@ -64,7 +65,7 @@ def log_pre_post(func: Callable[..., Any]) -> Callable[..., Any]:
     return wrapper
 
 
-def state_guard(
+def _state_guard(
     allowed_state: PlayerState | list[PlayerState] | None = None,
     forbidden_state: PlayerState | list[PlayerState] | None = None,
 ) -> Callable[[Callable[..., None]], Callable[..., None]]:
@@ -163,7 +164,7 @@ class ThreadingState:
         default_factory=threading.Event
     )
     worker_is_rendering: bool = False
-    main_is_blitting: bool = False
+    flip_required: bool = False
     worker_render_done: threading.Event = dataclasses.field(
         default_factory=threading.Event
     )
@@ -187,13 +188,14 @@ class MpvMoviestim:
     _profiling: bool
     _timings: list[list[float]]
     # MPV and OpenGL
+    _mpv_lib: ModuleType
     _player: mpv.MPV
     _mpv_options: dict[str, Any]
-    _draw_rect_px: tuple[int, int, int, int] | None  # display rect (x, y, w, h)
+    _draw_rect: tuple[int, int, int, int] | None  # display rect (x, y, w, h)
     _c_getproc: ctypes._CFunctionType
     _mpv_render_ctx: mpv.MpvRenderContext
     _target_fbo_info: dict[str, int]  # mpv.MpvOpenGLFBO
-    _report_swap_on_next: bool
+    _report_swap: bool
 
     def __init__(
         self,
@@ -226,47 +228,58 @@ class MpvMoviestim:
         self._size = size
         self._position = pos
         self._media_size = None
-        self._draw_rect_px = self.bounding_rect(size, self._media_size, pos, window)
+        self._draw_rect = self.bounding_rect(size, self._media_size, pos, window)
         self._autostart = autoStart
         self._player_state = PlayerState.UNSPECIFIED
-        self._report_swap_on_next = False
+        self._report_swap = False
         self._profiling = profiling
 
         # Synchronisation primitives — must exist before worker thread starts.
         self._threading_state = ThreadingState()
 
+        # lazy load MPV
+        self._mpv_lib = importlib.import_module("mpv")
         self._init_mpv_player()
         self.loadMovie(file)
 
-    @log_pre_post
-    @state_guard(allowed_state=PlayerState.UNSPECIFIED)
+    @_log_pre_post
+    @_state_guard(allowed_state=PlayerState.UNSPECIFIED)
     def _init_mpv_player(self) -> None:
+
         # create MPV player instance
         try:
-            self._player = mpv.MPV(**self._mpv_options)
+            self._player = self._mpv_lib.MPV(**self._mpv_options)
             self._player.observe_property("eof-reached", self._on_eof)
 
             # Build the GL proc-address resolver (a plain function pointer —
             # no GL context required yet).
-            self._c_getproc = mpv.MpvGlGetProcAddressFn(utils.get_proc_address)
+            self._c_getproc = self._mpv_lib.MpvGlGetProcAddressFn(
+                utils.get_proc_address
+            )
 
             # Determine the best pixel format to render to.  Must happen while
             # the main window's context is current (psychopy keeps it current
             # on the main thread).
-            inferred_fbo_format, format_name = get_psychopy_target_pixel_format(
-                self._window
+            inferred_fbo_info = pixel_format.get_psychopy_fbo_info(self._window)
+            format_name = (
+                "<undetermined>"
+                if "internal_format" not in inferred_fbo_info
+                else pixel_format.get_internal_format_name(
+                    inferred_fbo_info["internal_format"]
+                )
             )
             logging.info(
-                f"Psychopy's rendering FBO: fbo={inferred_fbo_format['fbo']}, "
-                f"size={inferred_fbo_format['w']}x{inferred_fbo_format['h']}, "
-                f"format={format_name if format_name else '<undetermined>'}"
+                f"Psychopy's rendering FBO: fbo={inferred_fbo_info['fbo']}, "
+                f"size={inferred_fbo_info['w']}x{inferred_fbo_info['h']}, "
+                f"format={format_name}"
             )
-            self._target_fbo_info = inferred_fbo_format
+            self._target_fbo_info = inferred_fbo_info
 
             # Create the shadow window (shared context) on the main thread so
             # that its DC/surface is set up before the worker uses it.
             # Pass winHandle (the underlying pyglet window) so utils.py does not
             # depend on PsychoPy.
+            logging.info("Creating shadow window for context sharing.")
             self._threading_state.shadow_window = utils.create_shadow_window(
                 self._window.winHandle
             )
@@ -274,110 +287,20 @@ class MpvMoviestim:
             # Start worker — it takes the shadow context, creates the render
             # context and the double-buffered intermediate FBOs, then signals
             # worker_init_done.
+            logging.info("Instantiating and starting renderer worker thread.")
             self._threading_state.worker_thread = threading.Thread(
                 target=self._render_worker, name="mpv-render-worker", daemon=True
             )
             self._threading_state.worker_thread.start()
+            logging.info("Waiting for worker thread to initialise.")
             self._threading_state.worker_init_done.wait()  # block until worker is ready
+            logging.info("Finished waiting for worker thread.")
 
             # set IDLE state, meaning core is active, file not loaded
             self._player_state = PlayerState.IDLE
         except Exception as e:
             logging.error(f"Failed to initialize MPV player: {e}")
             raise
-
-    # def _update_bounding_rect(self) -> None:
-    #     """Update pixel-based bounding rectangle from Psychopy-based size and position.
-
-    #     Notes
-    #     -----
-    #     - Psychopy's window size is in pixels; position and size can be in any Psychopy units
-    #     - Display position is relative to window centre
-    #     - All units other than pixels are converted using Psychopy's `convertToPix` function
-    #     - If dipslay size is not given, media size is used when available
-    #     - If neither size nor media size are available, the bounding rect is not updated
-    #     - Bounding rect = bottom-left and top-right corners in window pixels, needed for OpenGL blit
-    #     """
-
-    #     if self._size is None and self._media_size is None:
-    #         logging.info(
-    #             "Size not specified and media size not available yet, not updating bounding rect."
-    #         )
-    #         return
-    #     # The above guard is supposed to prevent both media size and size being None at the same time,
-    #     # but type checkers don't seem to understand this logic, so additional asserts were needed
-    #     # below to silence errors.
-
-    #     screen_centre_px: tuple[int, int] = (
-    #         self._window.size[0] / 2,
-    #         self._window.size[1] / 2,
-    #     )
-
-    #     # if units are not pix, convert to pixels what's necessary
-    #     if not self._window.units == "pix":
-    #         if self._size is not None:
-    #             # if display size is provided, calculate bounding rect directly
-    #             # get vectors from screen centre to bottom-left/top-right of media in pixels
-    #             # we directly calculate corner positions to allow for non-rectangular units
-    #             vertices = [
-    #                 (
-    #                     self._position[0] - self._size[0] / 2,
-    #                     self._position[1] - self._size[1] / 2,
-    #                 ),
-    #                 (
-    #                     self._position[0] + self._size[0] / 2,
-    #                     self._position[1] + self._size[1] / 2,
-    #                 ),
-    #             ]
-    #             bottom_left_px, top_right_px = cast(
-    #                 tuple[tuple[float, float], tuple[float, float]],
-    #                 convertToPix(
-    #                     pos=[0, 0],
-    #                     vertices=vertices,
-    #                     units=self._window.units,
-    #                     win=self._window,
-    #                 ),
-    #             )
-    #         else:
-    #             assert self._media_size is not None  # guaranteed, silences errors
-    #             # display size not provided, only convert position to px
-    #             # pos_px: screen centre -> media element centre vector in pixels
-    #             pos_px: tuple[float, float] = convertToPix(
-    #                 pos=[0, 0],
-    #                 vertices=[self._position],
-    #                 units=self._window.units,
-    #                 win=self._window,
-    #             )[0]
-    #             bottom_left_px = (
-    #                 pos_px[0] - self._media_size[0] / 2,
-    #                 pos_px[1] - self._media_size[1] / 2,
-    #             )
-    #             top_right_px = (
-    #                 pos_px[0] + self._media_size[0] / 2,
-    #                 pos_px[1] + self._media_size[1] / 2,
-    #             )
-    #         # bounding rect absolute coordinates = screen centre position +  corner vectors
-    #         self._bounding_rect_px = (
-    #             int(bottom_left_px[0] + screen_centre_px[0]),
-    #             int(bottom_left_px[1] + screen_centre_px[1]),
-    #             int(top_right_px[0] + screen_centre_px[0]),
-    #             int(top_right_px[1] + screen_centre_px[1]),
-    #         )
-    #         return
-    #     else:
-    #         # Everything is in pixels, we only need to decide what display size to use
-    #         pos_px = self._position
-    #         if self._size is None:
-    #             assert self._media_size is not None  # guaranteed, silences errors
-    #             size_px: tuple[int | float, int | float] = self._media_size
-    #         else:
-    #             size_px = self._size
-    #         self._bounding_rect = (
-    #             int(screen_centre_px[0] + pos_px[0] - size_px[0] / 2),
-    #             int(screen_centre_px[1] + pos_px[1] - size_px[1] / 2),
-    #             int(screen_centre_px[0] + pos_px[0] + size_px[0] / 2),
-    #             int(screen_centre_px[1] + pos_px[1] + size_px[1] / 2),
-    #         )
 
     @staticmethod
     def bounding_rect(
@@ -413,12 +336,12 @@ class MpvMoviestim:
         )
 
         # if units are not pix, convert to pixels what's necessary
-        if not window.units == "pix":
+        if window.units != "pix":
             if size is not None:
                 # if display size is provided, calculate bounding rect directly
                 # get vectors from screen centre to bottom-left/top-right of media in pixels
                 # we directly calculate corner positions to allow for non-rectangular units
-                vertices = [
+                corners = [
                     (
                         position[0] - size[0] / 2,
                         position[1] - size[1] / 2,
@@ -432,7 +355,7 @@ class MpvMoviestim:
                     tuple[tuple[float, float], tuple[float, float]],
                     convertToPix(
                         pos=[0, 0],
-                        vertices=vertices,
+                        vertices=corners,
                         units=window.units,
                         win=window,
                     ),
@@ -464,15 +387,11 @@ class MpvMoviestim:
             )
         else:
             # Everything is in pixels, we only need to decide what display size to use
-            pos_px = position
-            if size is None:
-                assert media_size is not None  # guaranteed, silences errors
-                size_px: tuple[int | float, int | float] = media_size
-            else:
-                size_px = size
+            size_px = size if size is not None else media_size
+            assert size_px is not None
             bounding_rect = (
-                int(screen_centre_px[0] + pos_px[0] - size_px[0] / 2),
-                int(screen_centre_px[1] + pos_px[1] - size_px[1] / 2),
+                int(screen_centre_px[0] + position[0] - size_px[0] / 2),
+                int(screen_centre_px[1] + position[1] - size_px[1] / 2),
                 int(size_px[0]),
                 int(size_px[1]),
             )
@@ -497,17 +416,15 @@ class MpvMoviestim:
         """
         w = max(
             self._target_fbo_info["w"],
-            self._bounding_rect[2] - self._bounding_rect[0]
-            if self._bounding_rect is not None
-            else 0,
+            self._draw_rect[2] if self._draw_rect is not None else 0,
         )
         h = max(
             self._target_fbo_info["h"],
-            self._bounding_rect[3] - self._bounding_rect[1]
-            if self._bounding_rect is not None
-            else 0,
+            self._draw_rect[3] if self._draw_rect is not None else 0,
         )
-        internal_format = self._target_fbo_info["internal_format"]
+        internal_format = self._target_fbo_info.get(
+            "internal_format", pixel_format.default_pixel_format
+        )
         tex_id = utils.create_texture(w, h, internal_format)
         fbo_id = utils.create_fbo(tex_id)
         info: dict[str, int] = {
@@ -531,6 +448,7 @@ class MpvMoviestim:
         """Worker thread: render new frames into intermediate buffers
 
         Owns the shadow GL context and MPV render context.
+        Responsible for drawing new frames into an intermediate FBO
 
         Lifecycle
         ---------
@@ -556,13 +474,12 @@ class MpvMoviestim:
             f"MPV render worker: GL_RENDERER = {renderer if renderer else '<unknown>'}"
         )
 
-        self._mpv_render_ctx = mpv.MpvRenderContext(
+        self._mpv_render_ctx = self._mpv_lib.MpvRenderContext(
             self._player,
             "opengl",
             opengl_init_params={"get_proc_address": self._c_getproc},
             advanced_control=True,
         )
-        # The update callback body MUST only set the event — nothing else.
         self._mpv_render_ctx.update_cb = self._mpv_update_callback
 
         # Double-buffered intermediate FBOs (created on the shadow context).
@@ -647,7 +564,7 @@ class MpvMoviestim:
         print(f"MPV: {level=}, {prefix=}, {text=}")
         logging.exp(f"MPV: {text}")
 
-    @log_pre_post
+    @_log_pre_post
     def _on_eof(self, prop_name, value) -> None:
         # eof-reached -> None at init
         # eof-reached -> False when playback starts
@@ -676,8 +593,8 @@ class MpvMoviestim:
     #     if hasattr(self, "_intermediate_fbo_info"):
     #         utils.destroy_fbo(self._intermediate_fbo_info["fbo"])
 
-    @log_pre_post
-    @state_guard(forbidden_state=[PlayerState.UNSPECIFIED, PlayerState.SHUTDOWN])
+    @_log_pre_post
+    @_state_guard(forbidden_state=[PlayerState.UNSPECIFIED, PlayerState.SHUTDOWN])
     def loadMovie(self, file: Path | str) -> None:
         """Load a movie file into the player, replacing any currently loaded file.
 
@@ -724,18 +641,18 @@ class MpvMoviestim:
         """Alias for loadMovie()"""
         self.loadMovie(fileName)
 
-    @log_pre_post
-    @state_guard(allowed_state=PlayerState.PAUSED)
+    @_log_pre_post
+    @_state_guard(allowed_state=PlayerState.PAUSED)
     def play(self, block: bool = False) -> None:
-        self._report_swap_on_next = False
+        self._report_swap = False
         self._player.pause = False
         if block:
             self._player.wait_until_playing()
         self._player_state = PlayerState.PLAYING
         logging.exp("State change: PAUSED -> PLAYING")
 
-    @log_pre_post
-    @state_guard(allowed_state=PlayerState.PLAYING)
+    @_log_pre_post
+    @_state_guard(allowed_state=PlayerState.PLAYING)
     def pause(self, block: bool = False) -> None:
         self._player.pause = True
         if block:
@@ -743,8 +660,8 @@ class MpvMoviestim:
         self._player_state = PlayerState.PAUSED
         logging.exp("State change: PLAYING -> PAUSED")
 
-    @log_pre_post
-    @state_guard(allowed_state=[PlayerState.PAUSED, PlayerState.PLAYING])
+    @_log_pre_post
+    @_state_guard(allowed_state=[PlayerState.PAUSED, PlayerState.PLAYING])
     def stop(self) -> None:
         self._player_state = PlayerState.SHUTDOWN
         print(f"frame-drop-count: {self._player.frame_drop_count}")
@@ -809,45 +726,54 @@ class MpvMoviestim:
         ts = self._threading_state
 
         # Read the index of the most recently completed worker frame.
-        t0 = perf_counter()
+        # t0 = perf_counter()
         with ts.fbo_lock:
-            present_idx = ts.present_fbo_idx
             worker_is_rendering = ts.worker_is_rendering
-        timings[0] = perf_counter() - t0
+            if not worker_is_rendering and ts.flip_required:
+                ts.present_fbo_idx = ts.worker_fbo_idx
+                ts.worker_fbo_idx = 1 - ts.worker_fbo_idx
+                ts.flip_required = False
 
         if worker_is_rendering:
             # Worker is mid-render: CPU-wait so we get the newest frame this cycle.
-            t0 = perf_counter()
-            ts.worker_render_done.wait()  # no timeout; GPU serializes after this
+            ts.worker_render_done.wait()
             with ts.fbo_lock:
-                present_idx = ts.present_fbo_idx
-            timings[1] += perf_counter() - t0
+                if ts.flip_required:
+                    ts.present_fbo_idx = ts.worker_fbo_idx
+                    ts.worker_fbo_idx = 1 - ts.worker_fbo_idx
+                    ts.flip_required = False
+
+        present_idx = ts.present_fbo_idx  # only main writes this; safe outside lock
+        # timings[0] = perf_counter() - t0
 
         if present_idx == -1:
             logging.error(
                 "draw() called but no frame has been rendered yet — nothing to blit."
             )
-            timings[2:] = 0
+            # timings[2:] = 0
             return
 
         if ts.intermediate_fbos is None:
             logging.error(
                 "draw() called but intermediate FBOs are not initialized — nothing to blit."
             )
-            timings[2:] = 0
+            # timings[2:] = 0
+            return
+
+        if self._draw_rect is None:
+            logging.error("draw() called but draw rectangle is undefined.")
             return
 
         fbo_info = ts.intermediate_fbos[present_idx]
 
         # GPU-side wait: stall the GPU command queue (not the CPU) until the
         # worker's render into this FBO is complete.
-        t0 = perf_counter()
-        render_fence = ts.render_fences[present_idx]
-        if render_fence is not None:
+        # t0 = perf_counter()
+        if (render_fence := ts.render_fences[present_idx]) is not None:
             gl.glWaitSync(render_fence, 0, gl.GL_TIMEOUT_IGNORED)
             gl.glDeleteSync(render_fence)
             ts.render_fences[present_idx] = None
-        timings[2] = perf_counter() - t0
+        # timings[2] = perf_counter() - t0
 
         # Snapshot NEXT_FRAME_INFO while we have a frame available.
         # move this to worker
@@ -859,32 +785,38 @@ class MpvMoviestim:
         # timings[3] = perf_counter() - t0
 
         # Blit intermediate FBO → PsychoPy's target FBO.
-        t0 = perf_counter()
-        tw, th = self._target_fbo_info["w"], self._target_fbo_info["h"]
+        # t0 = perf_counter()
+        # tw, th = self._target_fbo_info["w"], self._target_fbo_info["h"]
+        x, y, w, h = self._draw_rect
         utils.test_blit(
-            (fbo_info["w"], fbo_info["h"]),
-            (0, 0, tw, th),
-            (tw, th),
+            (w, h),
+            (x, y, w, h),
+            (w, h),
             fbo_info["fbo"],
             self._target_fbo_info["fbo"],
         )
-        timings[3] = perf_counter() - t0
+        # timings[3] = perf_counter() - t0
 
         # Post a blit fence so the worker knows it's safe to write to this FBO
         # again once the blit is GPU-complete.
-        t0 = perf_counter()
+        # t0 = perf_counter()
         ts.blit_fences[present_idx] = gl.glFenceSync(
             gl.GL_SYNC_GPU_COMMANDS_COMPLETE, 0
         )
-        self._report_swap_on_next = True
-        timings[4] = perf_counter() - t0
-
         gl.glFlush()
+        # timings[4] = perf_counter() - t0
+
+        self._report_swap = True
 
     def report_swap(self) -> None:
-        if self._report_swap_on_next:
+        """Report to MPV that the previous frame was drawn to screen.
+
+        Expected to be invoked manually right after a window.flip().
+        Reporting can be beneficial to MPV, though not reporting may also work.
+        """
+        if self._report_swap:
             self._mpv_render_ctx.report_swap()
-            self._report_swap_on_next = False
+            self._report_swap = False
 
     @property
     def state(self) -> PlayerState:

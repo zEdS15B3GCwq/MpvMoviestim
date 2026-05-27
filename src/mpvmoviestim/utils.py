@@ -455,6 +455,7 @@ def get_blit_fn(
     return blit_fn
 
 
+# TODO: simple blit without resizing, assuming same-size render, let gl take care of clips
 def test_blit(
     src_size: tuple[int, int],
     dst_rect: tuple[int, int, int, int],

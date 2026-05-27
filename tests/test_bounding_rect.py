@@ -5,15 +5,15 @@ from psychopy.visual import Window
 from mpvmoviestim.mpvmoviestim import MpvMoviestim
 
 
-@pytest.fixture(scope="module")
-def _monitor() -> Monitor:
+@pytest.fixture(scope="module", name="_monitor")
+def _fixture_monitor() -> Monitor:
     mon = Monitor(name="test-monitor", distance=60, width=40)
     mon.setSizePix([1920, 1080])
     return mon
 
 
-@pytest.fixture(scope="module")
-def win_pix(_monitor: Monitor):
+@pytest.fixture(scope="module", name="win_pix")
+def fixture_win_pix(_monitor: Monitor):
     win = Window(
         size=(1920, 1080),
         units="pix",
@@ -27,8 +27,8 @@ def win_pix(_monitor: Monitor):
         win.close()
 
 
-@pytest.fixture(scope="module")
-def win_norm(_monitor: Monitor):
+@pytest.fixture(scope="module", name="win_norm")
+def fixture_win_norm(_monitor: Monitor):
     win = Window(
         size=(1920, 1080),
         units="norm",
@@ -56,6 +56,8 @@ def test_bounding_rect_returns_none_without_size_or_media(win_pix) -> None:
     ("size", "media_size", "position", "expected"),
     [
         ((1920.0, 1080.0), None, (0.0, 0.0), (0, 0, 1920, 1080)),
+        ((1919.0, 1079.0), None, (0.0, 0.0), (0, 0, 1919, 1079)),
+        ((1918.0, 1078.0), None, (0.0, 0.0), (1, 1, 1918, 1078)),
         ((100.0, 100.0), None, (0.0, 0.0), (910, 490, 100, 100)),
         ((200.0, 150.0), None, (100.0, -50.0), (960, 415, 200, 150)),
         (None, (640.0, 480.0), (0.0, 0.0), (640, 300, 640, 480)),
@@ -84,6 +86,7 @@ def test_bounding_rect_pix(size, media_size, position, expected, win_pix) -> Non
         ((0.5, 0.5), None, (0.5, 0.5), (1200, 675, 480, 270)),
         ((1.0, 1.0), None, (-0.5, -0.5), (0, 0, 960, 540)),
         (None, (480.0, 270.0), (0.0, 0.0), (720, 405, 480, 270)),
+        ((2.0, 2.0), (480.0, 270.0), (0.0, 0.0), (0, 0, 1920, 1080)),
         (None, (640.0, 480.0), (0.5, 0.5), (1120, 570, 640, 480)),
         ((1.5, 1.5), None, (0.5, 0.5), (720, 405, 1440, 810)),
         ((0.5, 0.5), None, (-1.25, -1.25), (-480, -270, 480, 270)),
