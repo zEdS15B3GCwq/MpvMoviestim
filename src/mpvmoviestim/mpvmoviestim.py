@@ -1,5 +1,12 @@
-# trying to render into intermediate FBO, then blit immmediately to screen
-# may need fence/sync
+# worker thread renders into double-buffered intermediate FBOs
+# main thread blits from these to PsychoPy's FBO
+# NO: attempt to get MPV to work in display-vdrop mode that calculates optimised vframe target times
+# this requires display-fps to be set + update_cb -> update() -> render() on each vsync
+# and report_swap() has to be invoked right after flip() to keep the algorithm informed
+# YES:
+# - MPV in audio-driven mode, not estimating optimised target times
+# - option to have advanced_control mode on or off, either way worker responds to update_cb immediately(???)
+# - option for naive/optimised vframe pattern, latter needs screen and media fps
 
 # TODO: verify if locks/fences are guaranteed to resolve at some time - need timeout?
 
