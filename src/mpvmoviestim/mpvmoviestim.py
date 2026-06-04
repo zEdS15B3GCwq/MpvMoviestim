@@ -7,6 +7,7 @@
 # - MPV in audio-driven mode, not estimating optimised target times
 # - option to have advanced_control mode on or off, either way worker responds to update_cb immediately(???)
 # - option for naive/optimised vframe pattern, latter needs screen and media fps
+# (test: display-sync-active property, estimated-display-fps, vsync-jitter)
 
 # TODO: verify if locks/fences are guaranteed to resolve at some time - need timeout?
 
@@ -185,6 +186,7 @@ class MpvMoviestim:
     _window: visual.Window
     _position: tuple[int | float, int | float]  # position in Psychopy units
     _size: tuple[int | float, int | float] | None  # size in Psychopy units
+    _monitor_framerate: float
     # Media
     _loaded_movie: Path
     _autostart: bool
@@ -211,6 +213,7 @@ class MpvMoviestim:
         autoStart: bool = False,
         noAudio: bool = False,
         volume: float = 1.0,
+        monitor_framerate: float | None = None,
         mpv_options: dict[str, Any] | None = None,
         pos: tuple[int | float, int | float] = (0, 0),
         size: tuple[int | float, int | float] | None = None,
@@ -228,9 +231,6 @@ class MpvMoviestim:
                 0 if volume < 0 else 100 if volume > 1 else int(volume * 100)
             )
 
-        if mpv_options is not None:
-            self._mpv_options.update(mpv_options)
-
         self._window = window
         self._size = size
         self._position = pos
@@ -243,6 +243,22 @@ class MpvMoviestim:
 
         # Synchronisation primitives — must exist before worker thread starts.
         self._threading_state = ThreadingState()
+
+        # get monitor framerate
+        self._monitor_framerate = (
+            monitor_framerate
+            if monitor_framerate is not None
+            else self._window.getActualFrameRate(30, 200)
+        )
+        logging.info(
+            f"Monitor framerate={self._monitor_framerate}" + "(PP measured)"
+            if monitor_framerate is None
+            else "(set by parameter)"
+        )
+        self._mpv_options[""]
+
+        if mpv_options is not None:
+            self._mpv_options.update(mpv_options)
 
         # lazy load MPV
         self._mpv_lib = importlib.import_module("mpv")
