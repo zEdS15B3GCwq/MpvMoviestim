@@ -130,8 +130,8 @@ _mpv_default_options: dict[str, Any] = {
     "hwdec": "auto-safe",  # automatically choose H/W decoding pipeline
     "gpu_api": "opengl",  # use OpenGL API
     "keep-open": True,  # pause when reaching the end of the current file
-    # "idle": True,  # do not quit when there is no file to play
     "pause": True,  # start paused
+    # "idle": True,  # do not quit when there is no file to play
     # "wid": 0,  # do not create a new window (implied by other settings)
     # "keepaspect": False,
 }
@@ -153,17 +153,69 @@ class PlayerState(Enum):
 
 @dataclasses.dataclass
 class ThreadingState:
-    """All threading and FBO-handoff state owned by the render worker."""
+    """Synchronisation primitives and core objects related to the rendering worker thread.
+
+    - The worker thread is responsible for rendering MPV vframes into intermediate FBOs.
+    - The main thread is responsible for blitting from the intermediate FBOs to PsychoPy's window.
+    - MPV supplies vframes some time before their PTS, therefore, future vframes need to be
+      kept until their target time. We need 3 intermediate FBOs in total (triple bufferint):
+        - 1 for main to blit from
+        - 1 for the worker to render into
+        - 1 may be needed to hold a future frame not presented yet
+    - The worker thread owns the shadow GL context, MPV render context, and intermediate FBOs.
+    -
+
+    Attributes
+    ----------
+    worker_thread : threading.Thread | None
+        The thread object for the rendering worker.
+    shadow_window : BaseWindow | None
+        The shadow window that provides the GL context for the worker thread.
+    intermediate_fbos : tuple[dict[str, int], dict[str, int]] | None
+        The double-buffered intermediate FBOs used for rendering frames in the worker thread.
+    intermediate_fbo_textures : tuple[int, int] | None
+        Texture IDs for the intermediate FBOs, needed for cleanup.
+    present_fbo_idx : int
+        The index of the intermediate FBO that is currently ready for presentation (blitting).
+    worker_fbo_idx : int
+        The index of the intermediate FBO that the worker thread is currently rendering into.
+    render_trigger : threading.Event
+        Event set by the worker thread's MPV update callback to wake up the worker thread.
+    stop_event : threading.Event
+        Event set by the main thread to signal the worker thread to stop and exit.
+    worker_init_done : threading.Event
+        Event set by the worker thread once it has completed initialization.
+    worker_is_rendering : bool
+        Flag indicating whether the worker thread is currently rendering a frame. The main
+        thread checks this flag to decide whether to wait for the current render to finish before
+        blitting.
+    worker_render_done : threading.Event
+        Event set by the worker thread once it has finished rendering a frame to wake up the main
+        thread if it is waiting for the render to finish before blitting.
+    flip_required : bool
+        Flag set by the worker thread to signal that the intermediate FBOs are ready to be flipped.
+    fbo_lock : threading.Lock
+        Lock to protect access to the intermediate FBO indices and rendering flag when flipping
+        between buffers.
+    render_fences : list[Any]
+        List of OpenGL sync objects (fences) set by the worker thread after rendering a frame into
+        an intermediate FBO, which the main thread waits on before blitting from that FBO. This is
+        to ensure GPU-side synchronization.
+    blit_fences : list[Any]
+        List of OpenGL sync objects (fences) set by the main thread after blitting from an
+        intermediate FBO, which the worker thread waits on before rendering a new frame into
+        that FBO.
+    """
 
     # Core objects
     worker_thread: threading.Thread | None = None
     shadow_window: BaseWindow | None = None
 
     # Double buffering
-    present_fbo_idx: int = -1
-    worker_fbo_idx: int = 0
     intermediate_fbos: tuple[dict[str, int], dict[str, int]] | None = None
     intermediate_fbo_textures: tuple[int, int] | None = None
+    present_fbo_idx: int = -1
+    worker_fbo_idx: int = 0
 
     # Synchronisation
     render_trigger: threading.Event = dataclasses.field(default_factory=threading.Event)
@@ -200,6 +252,7 @@ class MpvMoviestim:
     _mpv_lib: ModuleType
     _player: mpv.MPV
     _mpv_options: dict[str, Any]
+    _advanced_control: bool
     _draw_rect: tuple[int, int, int, int] | None  # display rect (x, y, w, h)
     _c_getproc: ctypes._CFunctionType
     _mpv_render_ctx: mpv.MpvRenderContext
@@ -218,6 +271,7 @@ class MpvMoviestim:
         pos: tuple[int | float, int | float] = (0, 0),
         size: tuple[int | float, int | float] | None = None,
         profiling: bool = False,
+        advanced_control: bool = True,
     ):
         # combine default options with user options, and add log handler
         self._mpv_options = _mpv_default_options.copy()
@@ -240,6 +294,7 @@ class MpvMoviestim:
         self._player_state = PlayerState.UNSPECIFIED
         self._report_swap = False
         self._profiling = profiling
+        self._advanced_control = advanced_control
 
         # Synchronisation primitives — must exist before worker thread starts.
         self._threading_state = ThreadingState()
@@ -332,16 +387,16 @@ class MpvMoviestim:
         position: tuple[float, float],
         window: visual.Window,
     ) -> tuple[int, int, int, int] | None:
-        """Update pixel-based bounding rectangle from Psychopy-based size and position.
+        """Calculate pixel-based bounding rectangle from Psychopy-based size and position.
 
         Notes
         -----
-        - Psychopy's window size is in pixels; position and size can be in any Psychopy units
-        - Display position is relative to window centre
-        - All units other than pixels are converted using Psychopy's `convertToPix` function
-        - If dipslay size is not given, media size is used when available
-        - If neither size nor media size are available, the bounding rect is not updated
-        - Bounding rect = (x, y, w, h) in window pixels, needed for OpenGL blit
+        - Bounding rect (x, y, w, h in window pixels) is needed for OpenGL blit.
+        - Position = centre of media element relative to window centre; size = width and height.
+        - Psychopy's window size is in pixels; position and size can be in any Psychopy units.
+        - Units other than pixels are converted using Psychopy's `convertToPix` function.
+        - If display size is not given, media size is used if available.
+        - If neither size nor media size are available, None is returned.
         """
 
         if size is None and media_size is None:
@@ -501,7 +556,7 @@ class MpvMoviestim:
             self._player,
             "opengl",
             opengl_init_params={"get_proc_address": self._c_getproc},
-            advanced_control=True,
+            advanced_control=self._advanced_control,
         )
         self._mpv_render_ctx.update_cb = self._mpv_update_callback
 
@@ -523,15 +578,25 @@ class MpvMoviestim:
 
         # --- render loop ---
         while True:
-            ts.render_trigger.wait()
+            ts.render_trigger.wait()  # wait until the update callback is called
             ts.render_trigger.clear()
+
+            # drain pending MPV updates
+            update_result = self._mpv_render_ctx.update()
+
+            # stop only after draining updates to avoid hanging MPV core (necessary?)
             if ts.stop_event.is_set():
                 break
 
-            if not self._mpv_render_ctx.update():
-                # Spurious callback (non-frame event); nothing to render.
+            # Ignore callbacks when there is no new frame to render
+            if not update_result:
                 continue
 
+            # Set busy flag to tell main not to flip buffers while we're rendering.
+            # Main will also delay its blit until this is done so that it can show
+            # the newest frame. We essentially never need to wait for main as it only
+            # keeps the lock for flipping buffers, and we don't need to know whether
+            # the buffer we render to is the same as before or the other.
             ts.worker_render_done.clear()
             with ts.fbo_lock:
                 ts.worker_is_rendering = True
