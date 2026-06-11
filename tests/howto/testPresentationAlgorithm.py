@@ -2,7 +2,7 @@
 Simulation of media player frame presentation strategies.
 
 This script simulates two different algorithms for deciding when to present video frames:
-1. Naive algorithm: Always pick the frame with smallest PTS that is ready (PTS <= current_time)
+1. Naive algorithm: Always pick the frame with largest PTS that is ready (PTS <= current_time)
 2. Optimized algorithm (libmpv-style): Uses display sync error accumulation to minimize jitter
 
 The simulation tracks:
@@ -25,24 +25,19 @@ class FrameInfo:
     """Information about a decoded video frame."""
 
     index: int
-    pts: float  # Presentation time in seconds
-    delivery_time: float  # When the frame is delivered to the player (before PTS)
-    duration: float  # Duration this frame should be displayed (in seconds)
-    presented: bool = False  # Whether this frame has been presented at least once
+    pts: float  # Presentation time in ms
 
 
 def simulate_media_player(
-    num_frames: int = 100,
     num_vsyncs: int = 200,
-    media_fps: float = 24.0,
     screen_fps: float = 60.0,
-    supply_offset: float = 0.025,  # 25ms before PTS = 1.5 / screen_fps
+    media_fps: float = 24.0,
+    target_time_offset: float = 0.025,  # 25ms before PTS = 1.5 / screen_fps
 ) -> None:
     """
     Simulate media player frame presentation with two different algorithms.
 
     Args:
-        num_frames: Number of frames to simulate
         num_vsyncs: Number of vsync cycles to simulate
         media_fps: Frames per second of the media
         screen_fps: Refresh rate of the screen in Hz
@@ -50,29 +45,23 @@ def simulate_media_player(
     """
 
     # Calculate timing parameters
-    frame_duration: float = 1.0 / media_fps  # Duration of each frame in seconds
-    vsync_interval: float = 1.0 / screen_fps  # Time between vsyncs in seconds
+    num_frames: int = int(num_vsyncs / screen_fps * media_fps) + 1
+    frame_duration: float = 1000.0 / media_fps  # Duration of each frame in ms
+    vsync_interval: float = 1000.0 / screen_fps  # Time between vsyncs in ms
 
     # Generate simulated frames with their delivery times
-    frames = []
+    frames: list[FrameInfo] = []
     for i in range(num_frames):
-        pts = i * frame_duration  # When the frame should be presented
-        delivery_time = pts - supply_offset  # When it's actually delivered
-        frames.append(
-            FrameInfo(
-                index=i, pts=pts, delivery_time=delivery_time, duration=frame_duration
-            )
-        )
+        pts: float = (i * 1000) / media_fps  # When the frame should be presented
+        frames.append(FrameInfo(index=i, pts=pts))
 
     # State for naive algorithm
-    naive_buffer = []  # Frames available to display
-    naive_displayed = set()  # Indices of frames that have been presented
-    naive_skipped = set()  # Indices of frames dropped without presentation
+    naive_buffer: list[int] = []  # Frames available to display
+    naive_displayed: list[int] = [0] * num_frames  # Counts of how many times a frame was presented
 
     # State for optimized algorithm
-    opt_buffer = []  # Frames available to display
-    opt_displayed = set()  # Indices of frames that have been presented
-    opt_skipped = set()  # Indices of frames dropped without presentation
+    opt_buffer: list[int] = []  # Frames available to display
+    opt_displayed: list[int] = [0] * num_frames  # Counts of how many times a frame was presented
     opt_display_sync_error = 0.0  # Accumulated jitter error
     opt_current_frame_index = None  # Index of frame currently being held
     opt_vsyncs_remaining = 0  # How many more vsyncs to display current frame
@@ -89,7 +78,7 @@ def simulate_media_player(
         f"Frame Duration: {frame_duration * 1000:6.2f}ms | Vsync Interval: {vsync_interval * 1000:6.2f}ms"
     )
     print(
-        f"Supply Offset: {supply_offset * 1000:5.2f}ms | Total Frames: {num_frames:3d} | Total Vsyncs: {num_vsyncs:3d}"
+        f"Supply Offset: {target_time_offset * 1000:5.2f}ms | Total Frames: {num_frames:3d} | Total Vsyncs: {num_vsyncs:3d}"
     )
     print("=" * 130)
     print()
@@ -110,52 +99,46 @@ def simulate_media_player(
 
     # Simulation loop
     for vsync_num in range(num_vsyncs):
-        current_time = vsync_num * vsync_interval
-        current_time_ms = current_time * 1000
+        current_time = (1000 * vsync_num) / screen_fps
 
         # ========== FRAME DELIVERY ==========
         # Deliver new frames that are ready (their delivery time has come)
+        current_time_with_offset = current_time - target_time_offset
         while (
             next_frame_to_deliver < len(frames)
-            and frames[next_frame_to_deliver].delivery_time <= current_time
+            and frames[next_frame_to_deliver].pts <= current_time_with_offset
         ):
-            frame = frames[next_frame_to_deliver]
             naive_buffer.append(next_frame_to_deliver)
             opt_buffer.append(next_frame_to_deliver)
             next_frame_to_deliver += 1
 
+        # assert that buffers are sorted in increasing pts order
+        for i in range(len(naive_buffer) - 1):
+            assert frames[naive_buffer[i]].pts < frames[naive_buffer[i + 1]].pts
+        for i in range(len(opt_buffer) - 1):
+            assert frames[opt_buffer[i]].pts < frames[opt_buffer[i + 1]].pts
+
         # ========== NAIVE ALGORITHM ==========
         naive_frame_index = None
         naive_presentation_error = 0.0
-        naive_frame_dropped_this_vsync = False
+        naive_frames_dropped_this_vsync: list[int] = []
 
-        # Find the frame with smallest PTS that is ready to display (PTS <= current_time)
+        # Frames ready to display or older (PTS <= current_time)
         ready_for_naive = [i for i in naive_buffer if frames[i].pts <= current_time]
 
-        if ready_for_naive:
-            # Pick the one with smallest PTS (earliest)
-            naive_frame_index = max(ready_for_naive, key=lambda i: frames[i].pts)
-            frames[naive_frame_index].presented = True
-            naive_displayed.add(naive_frame_index)
-            naive_presentation_error = current_time - frames[naive_frame_index].pts
+        assert len(ready_for_naive) >= 1, "naive has no frames to display"
 
-        # Check for frames that have become too old and will never be displayed
-        # (older than 2 frame durations in the past and not yet displayed)
-        stale_threshold = current_time - frame_duration * 2
-        for frame_idx in naive_buffer:
-            if (
-                frames[frame_idx].pts < stale_threshold
-                and frame_idx not in naive_displayed
-            ):
-                naive_skipped.add(frame_idx)
-                naive_frame_dropped_this_vsync = True
+        # Pick the one with smallest PTS (earliest)
+        naive_frame_index = ready_for_naive[-1]
+        naive_displayed[naive_frame_index] += 1
+        naive_presentation_error = current_time - frames[naive_frame_index].pts
 
-        # Remove displayed frames and skipped frames from buffer
-        naive_buffer = [
-            i
-            for i in naive_buffer
-            if i not in naive_displayed and i not in naive_skipped
-        ]
+        # Check for skipped frames
+        # (anything older than current frame index that has not been displayed)
+        naive_frames_dropped_this_vsync = [i for i in ready_for_naive[:-1] if naive_displayed[i] == 0]
+
+        # Remove old displayed and skipped frames from buffer
+        naive_buffer = naive_buffer[naive_frame_index:]
 
         # ========== OPTIMIZED ALGORITHM ==========
         opt_frame_index = None
@@ -268,34 +251,34 @@ if __name__ == "__main__":
     # - Frames delivered 1ms before their PTS
     # - 100 frames × ~200 vsyncs gives reasonable simulation duration
 
-    print("\nScenario 1: 24 fps video on 60 Hz display (1:2.5 ratio)")
-    print("=" * 130)
-    simulate_media_player(
-        num_frames=100,
-        num_vsyncs=200,
-        media_fps=24.0,
-        screen_fps=60.0,
-        supply_offset=0.001,  # 1ms before PTS
-    )
+    # print("\nScenario 1: 24 fps video on 60 Hz display (1:2.5 ratio)")
+    # print("=" * 130)
+    # simulate_media_player(
+    #     num_frames=100,
+    #     num_vsyncs=200,
+    #     media_fps=24.0,
+    #     screen_fps=60.0,
+    #     supply_offset=0.001,  # 1ms before PTS
+    # )
 
-    print("\n\n")
-    print("Scenario 2: 30 fps video on 60 Hz display (1:2 ratio)")
-    print("=" * 130)
-    simulate_media_player(
-        num_frames=100,
-        num_vsyncs=200,
-        media_fps=30.0,
-        screen_fps=60.0,
-        supply_offset=0.001,  # 1ms before PTS
-    )
+    # print("\n\n")
+    # print("Scenario 2: 30 fps video on 60 Hz display (1:2 ratio)")
+    # print("=" * 130)
+    # simulate_media_player(
+    #     num_frames=100,
+    #     num_vsyncs=200,
+    #     media_fps=30.0,
+    #     screen_fps=60.0,
+    #     supply_offset=0.001,  # 1ms before PTS
+    # )
 
-    print("\n\n")
-    print("Scenario 3: 23.976 fps video on 60 Hz display (NTSC timing)")
-    print("=" * 130)
-    simulate_media_player(
-        num_frames=100,
-        num_vsyncs=300,
-        media_fps=23.976,
-        screen_fps=60.0,
-        supply_offset=0.002,  # 2ms before PTS
-    )
+    # print("\n\n")
+    # print("Scenario 3: 23.976 fps video on 60 Hz display (NTSC timing)")
+    # print("=" * 130)
+    # simulate_media_player(
+    #     num_frames=100,
+    #     num_vsyncs=300,
+    #     media_fps=23.976,
+    #     screen_fps=60.0,
+    #     supply_offset=0.002,  # 2ms before PTS
+    # )
