@@ -1,57 +1,17 @@
-# threaded, uses intermediate FBO
-# target: display-vdrop when report_swap used, otherwise audio sync
+# threaded, intermediate FBO, unfinished
 
-# Based on libmpv code analysis by sonnnet 4.6 & 5, libmpv has
-# two display modes that don't modify the audio channel:
-# a vsyncs_count display strategy where the display duration of
-# vframes is optimised to minimise presentation delay jitter, and
-# an audio-sync mode that only considers elapsed time and PTS to
-# decide when to show the next vframe. The first strategy needs to
-# be aware of screen refreshes, but vo=libmpv that we use here has
-# no way to report vsyncs, so report_swap() has to be used. There's
-# no point in trying to implement this algorithm ourselves, as we
-# need the same information, and if we have that then we can just
-# let mpv do the calculation. In this case we need to ask users
-# to invoke report_swap() within each vsync cycle, preferably right
-# after PsychoPy returns from flip. LibMPV caches ready vframes
-# between vsync cycles, so it's efficient to ask it to re-render
-# the same vframe on each cycle. This mode also requires the option
-# display-fps-override (or something similar) to be set. We can use
-# the value provided by PsychoPy.
-# The audio sync mode doesn't need report_swap(), in fact,
-# report_swap() should not be invoked at all. If MPV thinks that
-# swaps are reported, it will wait on it, which will delay the
-# render loop if report_swap is not used consistently. In this
-# mode, vframes are only cached in a decoded but not presentation-
-# ready state (no scaling, colour conversion, etc. done), so
-# re-rendering via render_ctx_render incurs an additional cost.
-# Because of this, it's better to just render into an intermediate
-# FBO/tex and re-use that. If we allow rescales during playback,
-# then we need to invalidate this intermediate FBO and let MPV
-# do the scaling etc. again.
-
-# Another mode to consider is advanced control mode. In some
-# situations, it may be advantageous to support it. It seems that
-# supporting it only requires update() being called immediately
-# after mpv calls our update_callback(). While the non-advanced
-# operating mode could be single-threaded (draw loop calls update,
-# renders into FBO if new vframe available, draws to screen),
-# because of the hope to support advanced control mode, let's stick
-# to a threaded model.
-
-# A threaded implementation uses a worker thread that handles
-# update callbacks, calls mpv's update and renders into the
-# intermediate FBO when new frames are available, while the main
-# thread draw the newest available frame onto the screen (backbuffer
-# or Psychopy's FBO if used). We need double buffering to avoid
-# the threads waiting on each other. Buffer swaps should be done by
-# the main thread, otherwise we need to ensure that the worker
-# cannot ever snatch away a buffer that the main thread was just
-# about to render.
+# worker thread renders into double-buffered intermediate FBOs
+# main thread blits from these to PsychoPy's FBO
+# NO: attempt to get MPV to work in display-vdrop mode that calculates optimised vframe target times
+# this requires display-fps to be set + update_cb -> update() -> render() on each vsync
+# and report_swap() has to be invoked right after flip() to keep the algorithm informed
+# YES:
+# - MPV in audio-driven mode, not estimating optimised target times
+# - option to have advanced_control mode on or off, either way worker responds to update_cb immediately(???)
+# - option for naive/optimised vframe pattern, latter needs screen and media fps
+# (test: display-sync-active property, estimated-display-fps, vsync-jitter)
 
 # TODO: verify if locks/fences are guaranteed to resolve at some time - need timeout?
-# TODO: profiling with efficient array() or NamedTuple(?)
-# TODO: import namedtuple, convert dataclass to namedtuple?
 
 from __future__ import annotations
 
@@ -62,8 +22,7 @@ import importlib
 import threading
 from enum import Enum, auto
 from pathlib import Path
-
-# from time import perf_counter
+from time import perf_counter
 from types import ModuleType
 from typing import TYPE_CHECKING, cast
 
@@ -102,13 +61,13 @@ def _log_pre_post(func: Callable[..., Any]) -> Callable[..., Any]:
         instance: MpvMoviestim = args[0]
         print(
             f"PRE {func.__name__}: "  # ty: ignore
-            f"state={instance._state.name}; "  # pylint: disable=protected-access
+            f"state={instance._player_state.name}; "  # pylint: disable=protected-access
             f"mpv={instance._mpv_state.name}"  # pylint: disable=protected-access
         )
         result = func(*args, **kwargs)
         print(
             f"POST {func.__name__}: "  # ty: ignore
-            f"state={instance._state.name}; "  # pylint: disable=protected-access
+            f"state={instance._player_state.name}; "  # pylint: disable=protected-access
             f"mpv={instance._mpv_state.name}"  # pylint: disable=protected-access
         )
         return result
@@ -117,8 +76,8 @@ def _log_pre_post(func: Callable[..., Any]) -> Callable[..., Any]:
 
 
 def _state_guard(
-    allowed_state: MPVMovieStimState | list[MPVMovieStimState] | None = None,
-    forbidden_state: MPVMovieStimState | list[MPVMovieStimState] | None = None,
+    allowed_state: PlayerState | list[PlayerState] | None = None,
+    forbidden_state: PlayerState | list[PlayerState] | None = None,
 ) -> Callable[[Callable[..., None]], Callable[..., None]]:
     """Decorator to enforce allowed and forbidden states when running methods."""
 
@@ -126,7 +85,7 @@ def _state_guard(
         None
         if allowed_state is None
         else [allowed_state]
-        if isinstance(allowed_state, MPVMovieStimState)
+        if isinstance(allowed_state, PlayerState)
         else allowed_state
     )
 
@@ -134,7 +93,7 @@ def _state_guard(
         None
         if forbidden_state is None
         else [forbidden_state]
-        if isinstance(forbidden_state, MPVMovieStimState)
+        if isinstance(forbidden_state, PlayerState)
         else forbidden_state
     )
 
@@ -143,7 +102,7 @@ def _state_guard(
         @functools.wraps(func)
         def wrapper(*args: Any, **kwargs: Any) -> None:
             instance: MpvMoviestim = args[0]
-            actual_state = instance._state  # pylint: disable=protected-access
+            actual_state = instance._player_state  # pylint: disable=protected-access
 
             if allowed_states is not None and actual_state not in allowed_states:
                 logging.warning(
@@ -174,15 +133,10 @@ _mpv_default_options: dict[str, Any] = {
     "gpu_api": "opengl",  # use OpenGL API
     "keep-open": True,  # pause when reaching the end of the current file
     "pause": True,  # start paused
-    "idle": True,  # do not quit when there is no file to play (needed for rewind?)
+    # "idle": True,  # do not quit when there is no file to play
     # "wid": 0,  # do not create a new window (implied by other settings)
-    # "keepaspect": False,  # (what does this do?)
-    "video-sync": "display-vdrop",
+    # "keepaspect": False,
 }
-# TODO: test if display-vdrop is OK to set here; not setting fps and not calling report_swap
-#       should automatically revert back to audio sync mode. Check vframe PTSes to see if this
-#       happens - in display sync the PTS is always 0, in audio sync it's the actual PTS.
-
 _mpv_default_audio_options: dict[str, Any] = {
     "volume": 100,  # set volume to 100%
     "volume_gain": 0,  # another way to set loudness
@@ -191,9 +145,7 @@ _mpv_default_audio_options: dict[str, Any] = {
 }
 
 
-class MPVMovieStimState(Enum):
-    """Internal state of MPVMoviesStim. Not the same as mpv's states."""
-
+class PlayerState(Enum):
     UNSPECIFIED = auto()
     SHUTDOWN = auto()  # MPV player core has shut down after quit()
     IDLE = auto()  # MPV core is active, no file loaded
@@ -274,11 +226,11 @@ class ThreadingState:
         default_factory=threading.Event
     )
     worker_is_rendering: bool = False
+    flip_required: bool = False
     worker_render_done: threading.Event = dataclasses.field(
         default_factory=threading.Event
     )
-    buffer_flip_required: bool = False
-    buffer_fbo_lock: threading.Lock = dataclasses.field(default_factory=threading.Lock)
+    fbo_lock: threading.Lock = dataclasses.field(default_factory=threading.Lock)
     render_fences: list[Any] = dataclasses.field(default_factory=lambda: [None, None])
     blit_fences: list[Any] = dataclasses.field(default_factory=lambda: [None, None])
 
@@ -288,21 +240,21 @@ class MpvMoviestim:
     _window: visual.Window
     _position: tuple[int | float, int | float]  # position in Psychopy units
     _size: tuple[int | float, int | float] | None  # size in Psychopy units
-    _monitor_framerate: float | None  # display-vdrop sync mode active if provided
+    _monitor_framerate: float
     # Media
     _loaded_movie: Path
     _autostart: bool
     _media_size: tuple[int, int] | None
     # Player core
-    _state: MPVMovieStimState
+    _player_state: PlayerState
     _threading_state: ThreadingState
-    # TODO: _profiling: bool
-    # TODO: _timings: list[list[float]]
+    _profiling: bool
+    _timings: list[list[float]]
     # MPV and OpenGL
     _mpv_lib: ModuleType
     _player: mpv.MPV
     _mpv_options: dict[str, Any]
-    # TODO: _advanced_control: bool
+    _advanced_control: bool
     _draw_rect: tuple[int, int, int, int] | None  # display rect (x, y, w, h)
     _c_getproc: ctypes._CFunctionType
     _mpv_render_ctx: mpv.MpvRenderContext
@@ -320,13 +272,13 @@ class MpvMoviestim:
         mpv_options: dict[str, Any] | None = None,
         pos: tuple[int | float, int | float] = (0, 0),
         size: tuple[int | float, int | float] | None = None,
-        # TODO: profiling: bool = False,
-        # TODO: advanced_control: bool = True,
+        profiling: bool = False,
+        advanced_control: bool = True,
     ):
+        # combine default options with user options, and add log handler
         self._mpv_options = _mpv_default_options.copy()
-        # add log handler
         self._mpv_options.update({"log_handler": self._mpv_log_fn, "loglevel": "info"})
-        # add audio options
+
         if noAudio:
             self._mpv_options["ao"] = "null"
         else:
@@ -334,41 +286,44 @@ class MpvMoviestim:
             self._mpv_options["volume"] = (
                 0 if volume < 0 else 100 if volume > 1 else int(volume * 100)
             )
-        # if monitor fps is provided, try display-vdrop video sync mode
-        # user can get fps with: window.getActualFrameRate()
-        if monitor_framerate is not None:
-            self._monitor_framerate = monitor_framerate
-            self._mpv_options["video-sync"] = "display-vdrop"
-        else:
-            self._monitor_framerate = None
-            self._mpv_options["video-sync"] = "audio"
-        # apply user-specified MPV options
-        if mpv_options is not None:
-            self._mpv_options.update(mpv_options)
 
         self._window = window
         self._size = size
         self._position = pos
-        self._autostart = autoStart
-        # self._profiling = profiling
-        # self._advanced_control = advanced_control
-
-        self._state = MPVMovieStimState.UNSPECIFIED
         self._media_size = None
         self._draw_rect = self.bounding_rect(size, None, pos, window)
+        self._autostart = autoStart
+        self._player_state = PlayerState.UNSPECIFIED
         self._report_swap = False
+        self._profiling = profiling
+        self._advanced_control = advanced_control
 
         # Synchronisation primitives — must exist before worker thread starts.
         self._threading_state = ThreadingState()
 
+        # get monitor framerate
+        self._monitor_framerate = (
+            monitor_framerate
+            if monitor_framerate is not None
+            else self._window.getActualFrameRate(30, 200)
+        )
+        logging.info(
+            f"Monitor framerate={self._monitor_framerate}" + "(PP measured)"
+            if monitor_framerate is None
+            else "(set by parameter)"
+        )
+        self._mpv_options[""]
+
+        if mpv_options is not None:
+            self._mpv_options.update(mpv_options)
+
         # lazy load MPV
         self._mpv_lib = importlib.import_module("mpv")
-
         self._init_mpv_player()
         self.loadMovie(file)
 
     @_log_pre_post
-    @_state_guard(allowed_state=MPVMovieStimState.UNSPECIFIED)
+    @_state_guard(allowed_state=PlayerState.UNSPECIFIED)
     def _init_mpv_player(self) -> None:
 
         # create MPV player instance
@@ -382,8 +337,9 @@ class MpvMoviestim:
                 utils.get_proc_address
             )
 
-            # Determine the best pixel format to render to.
-            # Must happen while the main window's context is current.
+            # Determine the best pixel format to render to.  Must happen while
+            # the main window's context is current (psychopy keeps it current
+            # on the main thread).
             inferred_fbo_info = pixel_format.get_psychopy_fbo_info(self._window)
             format_name = (
                 "<undetermined>"
@@ -421,7 +377,7 @@ class MpvMoviestim:
             logging.info("Finished waiting for worker thread.")
 
             # set IDLE state, meaning core is active, file not loaded
-            self._state = MPVMovieStimState.IDLE
+            self._player_state = PlayerState.IDLE
         except Exception as e:
             logging.error(f"Failed to initialize MPV player: {e}")
             raise
@@ -435,12 +391,9 @@ class MpvMoviestim:
     ) -> tuple[int, int, int, int] | None:
         """Calculate pixel-based bounding rectangle from Psychopy-based size and position.
 
-        Psychopy's non-pixel units and are centre-based position reference are converted
-        to screen pixels.
-
         Notes
         -----
-        - Display bounding rect (x, y, w, h in window pixels) is needed for OpenGL blit.
+        - Bounding rect (x, y, w, h in window pixels) is needed for OpenGL blit.
         - Position = centre of media element relative to window centre; size = width and height.
         - Psychopy's window size is in pixels; position and size can be in any Psychopy units.
         - Units other than pixels are converted using Psychopy's `convertToPix` function.
@@ -568,12 +521,7 @@ class MpvMoviestim:
     # ------------------------------------------------------------------
 
     def _mpv_update_callback(self) -> None:
-        """Called by MPV when a new frame may be ready.
-
-        This function needs to be minimal so that it doesn't cause any
-        lag. If advanced control mode is enabled, MPV's update()
-        must be called back without delay otherwise it stalls MPV.
-        """
+        """Called by MPV when a new frame may be ready."""
         self._threading_state.render_trigger.set()
 
     def _render_worker(self) -> None:
@@ -594,9 +542,9 @@ class MpvMoviestim:
         ts = self._threading_state
 
         # --- one-time init on this thread ---
-        if ts.shadow_window is None:
-            raise ValueError("shadow_window must be set before the worker starts")
-        # TODO: error type to raise
+        assert ts.shadow_window is not None, (
+            "shadow_window must be set before the worker starts"
+        )
         utils.make_context_current(ts.shadow_window)
         # ts.shadow_window.switch_to()
 
@@ -610,7 +558,7 @@ class MpvMoviestim:
             self._player,
             "opengl",
             opengl_init_params={"get_proc_address": self._c_getproc},
-            # TODO: advanced_control=self._advanced_control,
+            advanced_control=self._advanced_control,
         )
         self._mpv_render_ctx.update_cb = self._mpv_update_callback
 
@@ -643,23 +591,22 @@ class MpvMoviestim:
                 break
 
             # Ignore callbacks when there is no new frame to render
-            # (can happen when advanced control is enabled)
             if not update_result:
                 continue
 
             # Set busy flag to tell main not to flip buffers while we're rendering.
             # Main will also delay its blit until this is done so that it can show
             # the newest frame. We essentially never need to wait for main as it only
-            # keeps the lock while flipping buffers, and we don't need to know whether
+            # keeps the lock for flipping buffers, and we don't need to know whether
             # the buffer we render to is the same as before or the other.
             ts.worker_render_done.clear()
-            with ts.buffer_fbo_lock:
+            with ts.fbo_lock:
                 ts.worker_is_rendering = True
                 target_idx = ts.worker_fbo_idx
 
-            if ts.intermediate_fbos is None:
-                raise ValueError("intermediate_fbos must be set during worker init")
-            # TODO: better error type?
+            assert ts.intermediate_fbos is not None, (
+                "intermediate_fbos must be set during worker init"
+            )
             fbo_info = ts.intermediate_fbos[target_idx]
 
             # GPU-side: wait until the main thread has finished blitting from
@@ -685,7 +632,7 @@ class MpvMoviestim:
             gl.glFlush()
 
             # Hand off: publish which FBO is ready, clear rendering flag, flip index.
-            with ts.buffer_fbo_lock:
+            with ts.fbo_lock:
                 ts.worker_is_rendering = False
                 ts.present_fbo_idx = target_idx
                 ts.worker_fbo_idx = 1 - target_idx
@@ -709,17 +656,14 @@ class MpvMoviestim:
 
     @_log_pre_post
     def _on_eof(self, prop_name, value) -> None:
-        # value -> None at init
-        # value -> False when playback starts
-        # value -> True at EOF
+        # eof-reached -> None at init
+        # eof-reached -> False when playback starts
+        # eof-reached -> True at EOF
         # with keep-open set, player pauses instead of closing file
         print(f"on eof: property {prop_name} changed to {value}")
-        assert prop_name == "eof-reached", (
-            "_on_eof called with prop other than eof-reached"
-        )
-        if value:
+        if value:  # and prop_name == "eof-reached"  # no need
             logging.exp("EOF reached")
-            self._state = MPVMovieStimState.IDLE
+            self._player_state = PlayerState.IDLE
 
     def _on_drop(self, prop_name, value) -> None:
         print(f"Frame dropped. Property {prop_name} changed to {value}")
@@ -740,9 +684,7 @@ class MpvMoviestim:
     #         utils.destroy_fbo(self._intermediate_fbo_info["fbo"])
 
     @_log_pre_post
-    @_state_guard(
-        forbidden_state=[MPVMovieStimState.UNSPECIFIED, MPVMovieStimState.SHUTDOWN]
-    )
+    @_state_guard(forbidden_state=[PlayerState.UNSPECIFIED, PlayerState.SHUTDOWN])
     def loadMovie(self, file: Path | str) -> None:
         """Load a movie file into the player, replacing any currently loaded file.
 
@@ -773,7 +715,7 @@ class MpvMoviestim:
         self._player.loadfile(filename=str(file), mode="replace")
         self._loaded_movie = file
         self._player.wait_until_paused()
-        self._state = MPVMovieStimState.PAUSED
+        self._player_state = PlayerState.PAUSED
 
         self._player.wait_for_property("video-params")
         video_params = self._player.video_params
@@ -792,29 +734,29 @@ class MpvMoviestim:
         self.loadMovie(fileName)
 
     @_log_pre_post
-    @_state_guard(allowed_state=MPVMovieStimState.PAUSED)
+    @_state_guard(allowed_state=PlayerState.PAUSED)
     def play(self, block: bool = False) -> None:
         # TODO: threading state needs to be reset on play() following stop() or loadMovie()
         self._report_swap = False
         self._player.pause = False
         if block:
             self._player.wait_until_playing()
-        self._state = MPVMovieStimState.PLAYING
+        self._player_state = PlayerState.PLAYING
         logging.exp("State change: PAUSED -> PLAYING")
 
     @_log_pre_post
-    @_state_guard(allowed_state=MPVMovieStimState.PLAYING)
+    @_state_guard(allowed_state=PlayerState.PLAYING)
     def pause(self, block: bool = False) -> None:
         self._player.pause = True
         if block:
             self._player.wait_until_paused()
-        self._state = MPVMovieStimState.PAUSED
+        self._player_state = PlayerState.PAUSED
         logging.exp("State change: PLAYING -> PAUSED")
 
     @_log_pre_post
-    @_state_guard(allowed_state=[MPVMovieStimState.PAUSED, MPVMovieStimState.PLAYING])
+    @_state_guard(allowed_state=[PlayerState.PAUSED, PlayerState.PLAYING])
     def stop(self) -> None:
-        self._state = MPVMovieStimState.SHUTDOWN
+        self._player_state = PlayerState.SHUTDOWN
         print(f"frame-drop-count: {self._player.frame_drop_count}")
 
         # Ask MPV to stop the current file and wait until it is idle.
@@ -868,9 +810,9 @@ class MpvMoviestim:
         ``self.timings``.
         """
         # Don't use the guard wrapper here for performance reasons.
-        if self._state != MPVMovieStimState.PLAYING:
+        if self._player_state != PlayerState.PLAYING:
             logging.warning(
-                f"Cannot draw(), expected PLAYING state, got {self._state.name}."
+                f"Cannot draw(), expected PLAYING state, got {self._player_state.name}."
             )
             return
 
@@ -878,21 +820,21 @@ class MpvMoviestim:
 
         # Read the index of the most recently completed worker frame.
         # t0 = perf_counter()
-        with ts.buffer_fbo_lock:
+        with ts.fbo_lock:
             worker_is_rendering = ts.worker_is_rendering
-            if not worker_is_rendering and ts.buffer_flip_required:
+            if not worker_is_rendering and ts.flip_required:
                 ts.present_fbo_idx = ts.worker_fbo_idx
                 ts.worker_fbo_idx = 1 - ts.worker_fbo_idx
-                ts.buffer_flip_required = False
+                ts.flip_required = False
 
         if worker_is_rendering:
             # Worker is mid-render: CPU-wait so we get the newest frame this cycle.
             ts.worker_render_done.wait()
-            with ts.buffer_fbo_lock:
-                if ts.buffer_flip_required:
+            with ts.fbo_lock:
+                if ts.flip_required:
                     ts.present_fbo_idx = ts.worker_fbo_idx
                     ts.worker_fbo_idx = 1 - ts.worker_fbo_idx
-                    ts.buffer_flip_required = False
+                    ts.flip_required = False
 
         present_idx = ts.present_fbo_idx  # only main writes this; safe outside lock
         # timings[0] = perf_counter() - t0
@@ -970,20 +912,20 @@ class MpvMoviestim:
             self._report_swap = False
 
     @property
-    def state(self) -> MPVMovieStimState:
-        return self._state
+    def state(self) -> PlayerState:
+        return self._player_state
 
     @property
-    def _mpv_state(self) -> MPVMovieStimState:
+    def _mpv_state(self) -> PlayerState:
         # TODO: test
         if not hasattr(self, "_player") or self._player is None:
-            return MPVMovieStimState.UNSPECIFIED
+            return PlayerState.UNSPECIFIED
         if self._player.core_shutdown:
-            return MPVMovieStimState.SHUTDOWN
+            return PlayerState.SHUTDOWN
         if self._player.pause:
-            return MPVMovieStimState.PAUSED
+            return PlayerState.PAUSED
         if self._player.idle_active:
-            return MPVMovieStimState.IDLE
+            return PlayerState.IDLE
         if not self._player.core_idle:
-            return MPVMovieStimState.PLAYING
-        return MPVMovieStimState.UNSPECIFIED
+            return PlayerState.PLAYING
+        return PlayerState.UNSPECIFIED
