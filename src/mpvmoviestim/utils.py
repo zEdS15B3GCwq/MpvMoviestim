@@ -455,6 +455,84 @@ def get_blit_fn(
     return blit_fn
 
 
+def blit_with_draw_rect(
+    draw_rect: tuple[int, int, int, int],
+    src_fbo: int,
+    draw_fbo: int,
+    flipHoriz: bool = False,
+    flipVert: bool = False,
+) -> None:
+    """Blit image to FBO/tex
+
+    This routine is intended to cached, ready-to-draw FBO/tex.The image must
+    already be scaled to the target size. Image rect may extend over screen
+    borders - those parts are automatically trimmed by the blit.
+
+    Parameters
+    ----------
+    draw_rect : tuple[int, int, int, int]
+        Draw rectangle of image data with fields: x, y, w, h.
+    src_fbo: int
+        Source FBO identifier.
+    draw_fbo: int
+        Destination FBO identifier.
+    flipHoriz: bool
+        Flip image horizontally.
+    flipVert: bool
+        Flip image vertically.
+
+    Notes
+    -----
+    * This function draws the rect [0, 0, w, h] from the source to the rect
+      [x, y, x+w, y+h] on the draw target, not considering flips.
+    * PsychoPy's strategy is to set the draw target FBO once and then draw all
+      screen elements to it without setting the FBO again. Here, we initially
+      set both read and draw FBOs to be safe that the correct ones are active,
+      since libMPV may have changed them, but only save and restore the state
+      of the read FBO. Our target FBO is the same as the one Psychopy uses,
+      so it can be left as is.
+    """
+
+    # Save previously bound FBOs
+    previous_read_FBO = ctypes.c_int()
+    gl.glGetIntegerv(gl.GL_READ_FRAMEBUFFER_BINDING, ctypes.byref(previous_read_FBO))
+    # previous_read_FBO = gl.glGetInteger(gl.GL_READ_FRAMEBUFFER_BINDING)
+    # previous_draw_FBO = gl.glGetInteger(gl.GL_DRAW_FRAMEBUFFER_BINDING)
+
+    # Bind FBOs
+    gl.glBindFramebuffer(gl.GL_READ_FRAMEBUFFER, src_fbo)
+    gl.glBindFramebuffer(gl.GL_DRAW_FRAMEBUFFER, draw_fbo)
+
+    sx0, sy0 = 0, 0  # source bottom-left
+    sx1, sy1 = draw_rect[2:4]  # source top-right
+    if flipHoriz:
+        sx0, sx1 = sx1, sx0
+    if flipVert:
+        sy0, sy1 = sy1, sy0
+    dx0, dx1 = draw_rect[0], draw_rect[0] + draw_rect[2]  # destination bottom-left
+    dy0, dy1 = draw_rect[1], draw_rect[1] + draw_rect[3]  # destination top-right
+
+    # Draw
+    gl.glBlitFramebuffer(
+        sx0,
+        sy0,
+        sx1,
+        sy1,
+        dx0,
+        dy0,
+        dx1,
+        dy1,
+        gl.GL_COLOR_BUFFER_BIT,  # copy colour data
+        gl.GL_NEAREST,  # no resize necessary
+    )
+
+    # Restore FBOs
+    gl.glBindFramebuffer(gl.GL_READ_FRAMEBUFFER, previous_read_FBO.value)
+    # gl.glBindFramebuffer(gl.GL_READ_FRAMEBUFFER, previous_read_FBO)
+    # Restoring the draw FBO is unnecessary as we use the same target as PsychoPy
+    # gl.glBindFramebuffer(gl.GL_DRAW_FRAMEBUFFER, previous_draw_FBO)
+
+
 # TODO: simple blit without resizing, assuming same-size render, let gl take care of clips
 def test_blit(
     src_size: tuple[int, int],

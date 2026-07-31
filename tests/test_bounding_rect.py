@@ -43,7 +43,7 @@ def fixture_win_norm(_monitor: Monitor):
 
 
 def test_bounding_rect_returns_none_without_size_or_media(win_pix) -> None:
-    rect = MpvMoviestim.bounding_rect(
+    rect = MpvMoviestim._bounding_rect(
         size=None,
         media_size=None,
         position=(0.0, 0.0),
@@ -68,7 +68,7 @@ def test_bounding_rect_returns_none_without_size_or_media(win_pix) -> None:
     ],
 )
 def test_bounding_rect_pix(size, media_size, position, expected, win_pix) -> None:
-    rect = MpvMoviestim.bounding_rect(
+    rect = MpvMoviestim._bounding_rect(
         size=size,
         media_size=media_size,
         position=position,
@@ -93,7 +93,7 @@ def test_bounding_rect_pix(size, media_size, position, expected, win_pix) -> Non
     ],
 )
 def test_bounding_rect_norm(size, media_size, position, expected, win_norm) -> None:
-    rect = MpvMoviestim.bounding_rect(
+    rect = MpvMoviestim._bounding_rect(
         size=size,
         media_size=media_size,
         position=position,
