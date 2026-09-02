@@ -649,10 +649,10 @@ class MpvMoviestim:
         6. On exit: free render context, destroy FBOs/textures, release context.
         """
         ts = self._threading_state
-        prof = ts.profiler
-        rec = prof.worker if prof is not None else None
-        pool = prof.worker_gpu if prof is not None else None
-        buf = rec.buf if rec is not None else _EMPTY_TIMES
+        if ts.profiler is not None:
+            profiler_cpu = ts.profiler.worker
+            profiler_gpu = ts.profiler.worker_gpu
+            buf = profiler_cpu.buf
 
         # --- one-time init on this thread ---
         if ts.shadow_window is None:
@@ -696,16 +696,17 @@ class MpvMoviestim:
             ts.render_trigger.wait()  # wait until the update callback is called
             ts.render_trigger.clear()
 
-            base = -1 if rec is None else rec.next_iter()
-            if base >= 0:
-                assert prof is not None and pool is not None
-                prof.drain_wakes(buf, base)
-                pool.collect()  # harvest GPU results from previous iterations
+            base = -1 if profiler_cpu is None else profiler_cpu.next_iter()
+            profiling_enabled = base >= 0
+            if profiling_enabled:
+                assert profiler is not None and profiler_gpu is not None
+                profiler.drain_wakes(buf, base)
+                profiler_gpu.collect()  # harvest GPU results from previous iterations
                 buf[base + WS.UPDATE_T0] = perf_counter()
 
             # drain pending MPV updates
             update_result = self._mpv_render_ctx.update()
-            if base >= 0:
+            if profiling_enabled:
                 buf[base + WS.UPDATE_T1] = perf_counter()
 
             # stop only after draining updates to avoid hanging MPV core (necessary?)
@@ -723,12 +724,12 @@ class MpvMoviestim:
             # keeps the lock while flipping buffers, and we don't need to know whether
             # the buffer we render to is the same as before or the other.
             ts.worker_render_done.clear()
-            if base >= 0:
+            if profiling_enabled:
                 buf[base + WS.LOCK_T0] = perf_counter()
             with ts.buffer_fbo_lock:
                 ts.worker_is_rendering = True
                 target_idx = ts.worker_fbo_idx
-            if base >= 0:
+            if profiling_enabled:
                 buf[base + WS.LOCK_T1] = perf_counter()
 
             if ts.intermediate_fbo_infos is None:
@@ -740,7 +741,7 @@ class MpvMoviestim:
             # this FBO before we overwrite it.
             blit_fence = ts.blit_fences[target_idx]
             if blit_fence is not None:
-                if base >= 0:
+                if profiling_enabled:
                     buf[base + WS.WAITSYNC_BLIT_T0] = perf_counter()
                     # zero-timeout poll: was the main thread's blit already done?
                     st = gl.glClientWaitSync(blit_fence, 0, 0)
@@ -754,20 +755,20 @@ class MpvMoviestim:
                 gl.glWaitSync(blit_fence, 0, gl.GL_TIMEOUT_IGNORED)
                 gl.glDeleteSync(blit_fence)
                 ts.blit_fences[target_idx] = None
-                if base >= 0:
+                if profiling_enabled:
                     buf[base + WS.WAITSYNC_BLIT_T1] = perf_counter()
 
-            if base >= 0:
-                assert pool is not None
+            if profiling_enabled:
+                assert profiler_gpu is not None
                 buf[base + WS.RENDER_T0] = perf_counter()
-                pool.begin()
+                profiler_gpu.begin()
             self._mpv_render_ctx.render(
                 opengl_fbo=fbo_info,
                 flip_y=True,
                 block_for_target_time=False,
             )
-            if base >= 0:
-                pool.end(base)
+            if profiling_enabled:
+                profiler_gpu.end(base)
                 buf[base + WS.RENDER_T1] = perf_counter()
 
             # Post a fence so the main thread can wait for this render to finish
@@ -779,7 +780,7 @@ class MpvMoviestim:
             gl.glFlush()
 
             done_fence = None
-            if base >= 0:
+            if profiling_enabled:
                 buf[base + WS.FENCE_POST_T] = perf_counter()
                 # Private fence for the end-of-iteration GPU-done wait: issued at
                 # the same command-stream point as the shared render fence, but
@@ -792,12 +793,12 @@ class MpvMoviestim:
                 ts.worker_is_rendering = False
                 ts.present_fbo_idx = target_idx
                 ts.worker_fbo_idx = 1 - target_idx
-            if base >= 0:
+            if profiling_enabled:
                 buf[base + WS.FLIP_T] = perf_counter()
 
             # After lock release so present_fbo_idx is committed before draw() reads it.
             ts.worker_render_done.set()
-            if base >= 0:
+            if profiling_enabled:
                 buf[base + WS.SET_DONE_T] = perf_counter()
                 # End-of-iteration marker: block until the GPU has finished this
                 # iteration's render. Placed AFTER worker_render_done.set() so the
@@ -817,9 +818,9 @@ class MpvMoviestim:
                 buf[base + WS.ITER_DONE_T] = tw1
 
         # --- cleanup (shadow context still current on this thread) ---
-        if pool is not None:
+        if profiler_gpu is not None:
             # blocking drain so the final iterations' GPU durations are recorded
-            pool.drain_blocking()
+            profiler_gpu.drain_blocking()
         self._mpv_render_ctx.free()
         if ts.intermediate_fbo_textures is not None:
             for tex in ts.intermediate_fbo_textures:
@@ -1062,13 +1063,14 @@ class MpvMoviestim:
         rec = prof.main if prof is not None else None
         base = -1 if rec is None else rec.next_iter()
         buf = rec.buf if rec is not None else _EMPTY_TIMES
-        if base >= 0:
+        profiling_enabled = base >= 0
+        if profiling_enabled:
             assert prof is not None
             prof.main_gpu.collect()  # harvest GPU results from previous iterations
             buf[base + MS.DRAW_ENTRY_T] = perf_counter()
 
         # Read the index of the most recently completed worker frame.
-        if base >= 0:
+        if profiling_enabled:
             buf[base + MS.LOCK_T0] = perf_counter()
         with ts.buffer_fbo_lock:
             worker_is_rendering = ts.worker_is_rendering
@@ -1079,15 +1081,15 @@ class MpvMoviestim:
                     1 - ts.worker_fbo_idx,
                 )
                 ts.buffer_flip_required = False
-        if base >= 0:
+        if profiling_enabled:
             buf[base + MS.LOCK_T1] = perf_counter()
 
         # if worker is mid-render: CPU-wait so we get the newest frame this cycle
         if worker_is_rendering:
-            if base >= 0:
+            if profiling_enabled:
                 buf[base + MS.CPU_WAIT_T0] = perf_counter()
             ts.worker_render_done.wait()
-            if base >= 0:
+            if profiling_enabled:
                 buf[base + MS.CPU_WAIT_T1] = perf_counter()
             with ts.buffer_fbo_lock:
                 # flip buffers, worker is not using them for sure now
@@ -1117,7 +1119,7 @@ class MpvMoviestim:
         # GPU-side wait: stall the GPU command queue (not the CPU) until the
         # worker's render into this FBO is complete.
         if (render_fence := ts.render_fences[present_idx]) is not None:
-            if base >= 0:
+            if profiling_enabled:
                 buf[base + MS.WAITSYNC_RENDER_T0] = perf_counter()
                 # zero-timeout poll: was the worker's render already done?
                 st = gl.glClientWaitSync(render_fence, 0, 0)
@@ -1131,7 +1133,7 @@ class MpvMoviestim:
             gl.glWaitSync(render_fence, 0, gl.GL_TIMEOUT_IGNORED)
             gl.glDeleteSync(render_fence)
             ts.render_fences[present_idx] = None
-            if base >= 0:
+            if profiling_enabled:
                 buf[base + MS.WAITSYNC_RENDER_T1] = perf_counter()
 
         # Snapshot NEXT_FRAME_INFO while we have a frame available.
@@ -1142,7 +1144,7 @@ class MpvMoviestim:
         # )
 
         # Blit intermediate FBO → PsychoPy's target FBO.
-        if base >= 0:
+        if profiling_enabled:
             assert prof is not None
             buf[base + MS.BLIT_T0] = perf_counter()
             prof.main_gpu.begin()
@@ -1153,7 +1155,7 @@ class MpvMoviestim:
             self.flip_horizontal,
             self.flip_vertical,
         )
-        if base >= 0:
+        if profiling_enabled:
             prof.main_gpu.end(base)
             buf[base + MS.BLIT_T1] = perf_counter()
         # x, y, w, h = self._draw_rect
@@ -1172,7 +1174,7 @@ class MpvMoviestim:
         )
         gl.glFlush()
 
-        if base >= 0:
+        if profiling_enabled:
             buf[base + MS.FENCE_POST_T] = perf_counter()
             # End-of-iteration marker: block until the GPU has finished the blit.
             # Private fence (owned exclusively by the main thread) to avoid

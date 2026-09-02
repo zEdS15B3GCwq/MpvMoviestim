@@ -45,6 +45,7 @@ import csv
 from array import array
 from collections import deque
 from typing import TYPE_CHECKING
+from enum import Enum, auto
 
 from pyglet import gl
 
@@ -52,6 +53,8 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 __all__ = ["MS", "WS", "GpuTimerPool", "Profiler", "ThreadRecorder"]
+
+class WorkerEvents(Enum):
 
 
 class WS:
