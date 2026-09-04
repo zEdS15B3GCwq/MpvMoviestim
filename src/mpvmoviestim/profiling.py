@@ -1,4 +1,4 @@
-"""Minimal-overhead render-pipeline profiling for MpvMoviestim.
+"""Render pipeline profiling for MpvMoviestim.
 
 Design
 ------
@@ -45,124 +45,179 @@ import csv
 from array import array
 from collections import deque
 from typing import TYPE_CHECKING
-from enum import Enum, auto
 
 from pyglet import gl
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-__all__ = ["MS", "WS", "GpuTimerPool", "Profiler", "ThreadRecorder"]
+__all__ = [
+    "Worker_Timestamp_Indices",
+    "Render_Timestamp_Indices",
+    "GpuTimerPool",
+    "Profiler",
+    "ThreadRecorder",
+]
 
-class WorkerEvents(Enum):
 
-
-class WS:
+class Worker_Timestamp_Indices:
     """Worker-thread recorder slot indices (one row per worker iteration)."""
 
-    WAKE_IDX = 0  # index of this iteration's first wake in the wake log (-1: none)
-    WAKE_COUNT = 1  # number of mpv callback wakes drained this iteration
-    UPDATE_T0 = 2  # ctx.update() span
-    UPDATE_T1 = 3
-    LOCK_T0 = 4  # buffer_fbo_lock acquire span
-    LOCK_T1 = 5
-    WAITSYNC_BLIT_T0 = 6  # CPU-side span around glWaitSync(blit fence)
-    WAITSYNC_BLIT_T1 = 7
-    WAITSYNC_BLIT_STATE = 8  # zero-timeout poll: 1=already done, 2=not ready, 3=failed
-    RENDER_T0 = 9  # ctx.render() span (CPU-side command issue time)
-    RENDER_T1 = 10
-    FENCE_POST_T = 11  # render fence posted (instant)
-    FLIP_T = 12  # buffer indices flipped (instant)
-    SET_DONE_T = 13  # worker_render_done.set() (instant)
-    GPU_WAIT = (
-        14  # blocking clientWaitSync duration on private done-fence (-1: timeout)
+    UPDATE_T0: int
+    UPDATE_T1: int
+    LOCK_T0: int
+    LOCK_T1: int
+    WAITSYNC_BLIT_T0: int
+    WAITSYNC_BLIT_T1: int
+    WAITSYNC_BLIT_STATE: int
+    RENDER_T0: int
+    RENDER_T1: int
+    FENCE_POST_T: int
+    FLIP_REQUEST_T: int
+    SET_DONE_T: int
+    WAIT_DONE_DUR: int
+    ITER_DONE_T: int
+    GPU_RENDER: int
+
+    __slots__ = (  # noqa: RUF023
+        "UPDATE_T0",  # ctx.update() span
+        "UPDATE_T1",
+        "LOCK_T0",  # buffer_fbo_lock acquire span
+        "LOCK_T1",
+        "WAITSYNC_BLIT_T0",  # CPU-side span around glWaitSync(blit fence)
+        "WAITSYNC_BLIT_T1",
+        "WAITSYNC_BLIT_STATE",  # zero-timeout poll: OpenGL values
+        # TODO: translate to 1=already done, 2=not ready, 3=failed
+        "RENDER_T0",  # ctx.render() span (CPU-side command issue time)
+        "RENDER_T1",
+        "FENCE_POST_T",  # render fence posted (instant)
+        "FLIP_REQUEST_T",  # request to flip buffer indices (instant)
+        "SET_DONE_T",  # worker_render_done.set() (instant)
+        "WAIT_DONE_DUR",  # blocking clientWaitSync duration on private done-fence (-1: timeout)
+        "ITER_DONE_T",  # ~when the GPU finished this iteration's render (instant)
+        "GPU_RENDER",  # GL_TIME_ELAPSED duration of ctx.render() (seconds, filled late)
     )
-    ITER_DONE_T = 15  # ~when the GPU finished this iteration's render (instant)
-    GPU_RENDER = 16  # GL_TIME_ELAPSED duration of ctx.render() (seconds, filled late)
-    COUNT = 17
+
+    def __init__(self):
+        for index, name in enumerate(self.__slots__):
+            setattr(self, name, index)
 
 
-class MS:
-    """Main-thread recorder slot indices (one row per draw() call)."""
+class Render_Timestamp_Indices:
+    """Render thread recorder slot indices (one row per draw() call)."""
 
-    DRAW_ENTRY_T = 0  # draw() entered (instant)
-    LOCK_T0 = 1  # buffer_fbo_lock acquire span
-    LOCK_T1 = 2
-    CPU_WAIT_T0 = 3  # worker_render_done.wait() span (only when worker mid-render)
-    CPU_WAIT_T1 = 4
-    WAITSYNC_RENDER_T0 = 5  # CPU-side span around glWaitSync(render fence)
-    WAITSYNC_RENDER_T1 = 6
-    WAITSYNC_RENDER_STATE = (
-        7  # zero-timeout poll: 1=already done, 2=not ready, 3=failed
+    DRAW_ENTRY_T: int
+    LOCK_T0: int
+    LOCK_T1: int
+    CPU_WAIT_T0: int
+    CPU_WAIT_T1: int
+    WAITSYNC_RENDER_T0: int
+    WAITSYNC_RENDER_T1: int
+    WAITSYNC_RENDER_STATE: int
+    BLIT_T0: int
+    BLIT_T1: int
+    FENCE_POST_T: int
+    GPU_WAIT: int
+    ITER_DONE_T: int
+    DRAW_EXIT_T: int
+    REPORT_SWAP_T: int
+    GPU_BLIT: int
+
+    __slots__ = (  # noqa: RUF023
+        "DRAW_ENTRY_T",  # draw() entered (instant)
+        "LOCK_T0",  # buffer_fbo_lock acquire span
+        "LOCK_T1",
+        "CPU_WAIT_T0",  # worker_render_done.wait() span (only when worker mid-render)
+        "CPU_WAIT_T1",
+        "WAITSYNC_RENDER_T0",  # CPU-side span around glWaitSync(render fence)
+        "WAITSYNC_RENDER_T1",
+        "WAITSYNC_RENDER_STATE",  # zero-timeout poll: 1=already done, 2=not ready, 3=failed
+        "BLIT_T0",  # blit span (CPU-side command issue time)
+        "BLIT_T1",
+        "FENCE_POST_T",  # blit fence posted (instant)
+        "GPU_WAIT",  # blocking clientWaitSync duration on private done-fence (-1: timeout)
+        "ITER_DONE_T",  # ~when the GPU finished this iteration's blit (instant)
+        "DRAW_EXIT_T",  # draw() finished (instant)
+        "REPORT_SWAP_T",  # report_swap() called (instant, stamped into current row)
+        "GPU_BLIT",  # GL_TIME_ELAPSED duration of the blit (seconds, filled late)
     )
-    BLIT_T0 = 8  # blit span (CPU-side command issue time)
-    BLIT_T1 = 9
-    FENCE_POST_T = 10  # blit fence posted (instant)
-    GPU_WAIT = (
-        11  # blocking clientWaitSync duration on private done-fence (-1: timeout)
-    )
-    ITER_DONE_T = 12  # ~when the GPU finished this iteration's blit (instant)
-    DRAW_EXIT_T = 13  # draw() finished (instant)
-    REPORT_SWAP_T = 14  # report_swap() called (instant, stamped into current row)
-    GPU_BLIT = 15  # GL_TIME_ELAPSED duration of the blit (seconds, filled late)
-    COUNT = 16
+
+    def __init__(self):
+        for index, name in enumerate(self.__slots__):
+            setattr(self, name, index)
 
 
 # Slots holding genuine timestamps (used to find the timeline anchor t0 and
 # to skip zero/unset slots at retrieval). Duration/state/index slots are
 # deliberately excluded.
 _WORKER_TS_SLOTS = (
-    WS.UPDATE_T0,
-    WS.UPDATE_T1,
-    WS.LOCK_T0,
-    WS.LOCK_T1,
-    WS.WAITSYNC_BLIT_T0,
-    WS.WAITSYNC_BLIT_T1,
-    WS.RENDER_T0,
-    WS.RENDER_T1,
-    WS.FENCE_POST_T,
-    WS.FLIP_T,
-    WS.SET_DONE_T,
-    WS.ITER_DONE_T,
+    "UPDATE_T0",
+    "UPDATE_T1",
+    "LOCK_T0",
+    "LOCK_T1",
+    "WAITSYNC_BLIT_T0",
+    "WAITSYNC_BLIT_T1",
+    "RENDER_T0",
+    "RENDER_T1",
+    "FENCE_POST_T",
+    "FLIP_REQUEST_T",
+    "SET_DONE_T",
+    "ITER_DONE_T",
 )
 _MAIN_TS_SLOTS = (
-    MS.DRAW_ENTRY_T,
-    MS.LOCK_T0,
-    MS.LOCK_T1,
-    MS.CPU_WAIT_T0,
-    MS.CPU_WAIT_T1,
-    MS.WAITSYNC_RENDER_T0,
-    MS.WAITSYNC_RENDER_T1,
-    MS.BLIT_T0,
-    MS.BLIT_T1,
-    MS.FENCE_POST_T,
-    MS.ITER_DONE_T,
-    MS.DRAW_EXIT_T,
-    MS.REPORT_SWAP_T,
+    "DRAW_ENTRY_T",
+    "LOCK_T0",
+    "LOCK_T1",
+    "CPU_WAIT_T0",
+    "CPU_WAIT_T1",
+    "WAITSYNC_RENDER_T0",
+    "WAITSYNC_RENDER_T1",
+    "BLIT_T0",
+    "BLIT_T1",
+    "FENCE_POST_T",
+    "ITER_DONE_T",
+    "DRAW_EXIT_T",
+    "REPORT_SWAP_T",
 )
 
 _WORKER_SPANS = (
-    ("update", WS.UPDATE_T0, WS.UPDATE_T1),
-    ("lock", WS.LOCK_T0, WS.LOCK_T1),
-    ("waitsync_blit", WS.WAITSYNC_BLIT_T0, WS.WAITSYNC_BLIT_T1),
-    ("render_cpu", WS.RENDER_T0, WS.RENDER_T1),
+    ("update", Worker_Timestamp_Indices.UPDATE_T0, Worker_Timestamp_Indices.UPDATE_T1),
+    ("lock", Worker_Timestamp_Indices.LOCK_T0, Worker_Timestamp_Indices.LOCK_T1),
+    (
+        "waitsync_blit",
+        Worker_Timestamp_Indices.WAITSYNC_BLIT_T0,
+        Worker_Timestamp_Indices.WAITSYNC_BLIT_T1,
+    ),
+    (
+        "render_cpu",
+        Worker_Timestamp_Indices.RENDER_T0,
+        Worker_Timestamp_Indices.RENDER_T1,
+    ),
 )
 _WORKER_INSTANTS = (
-    ("fence_post", WS.FENCE_POST_T),
-    ("buffer_flip", WS.FLIP_T),
-    ("render_done_set", WS.SET_DONE_T),
+    ("fence_post", Worker_Timestamp_Indices.FENCE_POST_T),
+    ("buffer_flip", Worker_Timestamp_Indices.FLIP_T),
+    ("render_done_set", Worker_Timestamp_Indices.SET_DONE_T),
 )
 _MAIN_SPANS = (
-    ("lock", MS.LOCK_T0, MS.LOCK_T1),
-    ("cpu_wait_worker", MS.CPU_WAIT_T0, MS.CPU_WAIT_T1),
-    ("waitsync_render", MS.WAITSYNC_RENDER_T0, MS.WAITSYNC_RENDER_T1),
-    ("blit_cpu", MS.BLIT_T0, MS.BLIT_T1),
+    ("lock", Render_Timestamp_Indices.LOCK_T0, Render_Timestamp_Indices.LOCK_T1),
+    (
+        "cpu_wait_worker",
+        Render_Timestamp_Indices.CPU_WAIT_T0,
+        Render_Timestamp_Indices.CPU_WAIT_T1,
+    ),
+    (
+        "waitsync_render",
+        Render_Timestamp_Indices.WAITSYNC_RENDER_T0,
+        Render_Timestamp_Indices.WAITSYNC_RENDER_T1,
+    ),
+    ("blit_cpu", Render_Timestamp_Indices.BLIT_T0, Render_Timestamp_Indices.BLIT_T1),
 )
 _MAIN_INSTANTS = (
-    ("draw_entry", MS.DRAW_ENTRY_T),
-    ("fence_post", MS.FENCE_POST_T),
-    ("draw_exit", MS.DRAW_EXIT_T),
-    ("report_swap", MS.REPORT_SWAP_T),
+    ("draw_entry", Render_Timestamp_Indices.DRAW_ENTRY_T),
+    ("fence_post", Render_Timestamp_Indices.FENCE_POST_T),
+    ("draw_exit", Render_Timestamp_Indices.DRAW_EXIT_T),
+    ("report_swap", Render_Timestamp_Indices.REPORT_SWAP_T),
 )
 
 _POLL_STATE_NAMES = {1.0: "ready", 2.0: "not_ready", 3.0: "failed"}
@@ -313,10 +368,10 @@ class Profiler:
     the recordings into a single sorted timeline at retrieval time."""
 
     def __init__(self, capacity: int = 10_000, wake_factor: int = 8) -> None:
-        self.worker = ThreadRecorder(capacity, WS.COUNT)
-        self.main = ThreadRecorder(capacity, MS.COUNT)
-        self.worker_gpu = GpuTimerPool(self.worker, WS.GPU_RENDER)
-        self.main_gpu = GpuTimerPool(self.main, MS.GPU_BLIT)
+        self.worker = ThreadRecorder(capacity, Worker_Timestamp_Indices.COUNT)
+        self.main = ThreadRecorder(capacity, Render_Timestamp_Indices.COUNT)
+        self.worker_gpu = GpuTimerPool(self.worker, Worker_Timestamp_Indices.GPU_RENDER)
+        self.main_gpu = GpuTimerPool(self.main, Render_Timestamp_Indices.GPU_BLIT)
         # Appended by mpv's update callback thread, drained by the worker.
         self.wake_times: deque[tuple[float, bool]] = deque()
         # Preallocated wake log: parallel arrays of stamps and trigger flags.
@@ -341,8 +396,8 @@ class Profiler:
                 log_f[i] = 1 if trig else 0
                 i += 1
         self.wake_log_len = i
-        buf[base + WS.WAKE_IDX] = float(start) if count else -1.0
-        buf[base + WS.WAKE_COUNT] = float(count)
+        buf[base + Worker_Timestamp_Indices.WAKE_IDX] = float(start) if count else -1.0
+        buf[base + Worker_Timestamp_Indices.WAKE_COUNT] = float(count)
 
     @staticmethod
     def _first_ts(rec: ThreadRecorder, slots: tuple[int, ...]) -> float:
@@ -440,13 +495,13 @@ class Profiler:
             "render",
             _WORKER_SPANS,
             _WORKER_INSTANTS,
-            WS.WAITSYNC_BLIT_STATE,
-            WS.WAITSYNC_BLIT_T0,
+            Worker_Timestamp_Indices.WAITSYNC_BLIT_STATE,
+            Worker_Timestamp_Indices.WAITSYNC_BLIT_T0,
             "waitsync_blit_poll",
-            WS.GPU_RENDER,
-            WS.RENDER_T0,
-            WS.GPU_WAIT,
-            WS.ITER_DONE_T,
+            Worker_Timestamp_Indices.GPU_RENDER,
+            Worker_Timestamp_Indices.RENDER_T0,
+            Worker_Timestamp_Indices.WAIT_DONE_DUR,
+            Worker_Timestamp_Indices.ITER_DONE_T,
         )
         # per-iteration wake events from the callback thread
         buf = self.worker.buf
@@ -456,10 +511,10 @@ class Profiler:
         wake_n = self.wake_log_len
         for r in range(self.worker.rows):
             b = r * stride
-            count = int(buf[b + WS.WAKE_COUNT])
+            count = int(buf[b + Worker_Timestamp_Indices.WAKE_COUNT])
             if count <= 0:
                 continue
-            idx = int(buf[b + WS.WAKE_IDX])
+            idx = int(buf[b + Worker_Timestamp_Indices.WAKE_IDX])
             for k in range(count):
                 j = idx + k
                 if j >= wake_n:
@@ -478,13 +533,13 @@ class Profiler:
             "blit",
             _MAIN_SPANS,
             _MAIN_INSTANTS,
-            MS.WAITSYNC_RENDER_STATE,
-            MS.WAITSYNC_RENDER_T0,
+            Render_Timestamp_Indices.WAITSYNC_RENDER_STATE,
+            Render_Timestamp_Indices.WAITSYNC_RENDER_T0,
             "waitsync_render_poll",
-            MS.GPU_BLIT,
-            MS.BLIT_T0,
-            MS.GPU_WAIT,
-            MS.ITER_DONE_T,
+            Render_Timestamp_Indices.GPU_BLIT,
+            Render_Timestamp_Indices.BLIT_T0,
+            Render_Timestamp_Indices.GPU_WAIT,
+            Render_Timestamp_Indices.ITER_DONE_T,
         )
         events.sort(key=lambda e: e[0])
         return events

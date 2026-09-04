@@ -1,47 +1,50 @@
-# ❯  python bench_enum_retrieval.py --cycles 300 --repeats 3
-# cycles=300, repeats=3, field_count=128
+# ❯  python .\bench_enum_retrieval.py --cycles 1000 --repeats 3
+# cycles=1,000, repeats=3, field_count=128
 
 # 15 sequential retrievals
-#   slotted instance + direct names      0.05 ms     10.69 ns/retrieval   1.00x
-#   plain class + direct names        0.05 ms     11.76 ns/retrieval   1.10x
-#   namedtuple + direct names         0.07 ms     14.80 ns/retrieval   1.38x
-#   IntEnum + direct names            0.07 ms     16.64 ns/retrieval   1.56x
-#   Dict + direct names               0.09 ms     19.07 ns/retrieval   1.78x
-#   named dict[name]                  0.15 ms     33.49 ns/retrieval   3.13x
-#   plain class + getattr             0.18 ms     39.60 ns/retrieval   3.70x
-#   named tuple + getattr             0.18 ms     40.13 ns/retrieval   3.75x
-#   slotted instance + getattr        0.19 ms     41.64 ns/retrieval   3.90x
-#   Enum + direct names               0.34 ms     75.18 ns/retrieval   7.03x
-#   Enum[name].value                  0.52 ms    115.84 ns/retrieval  10.84x
-#   IntEnum[name].value               0.56 ms    124.87 ns/retrieval  11.68x
+#   slotted instance + direct names      0.16 ms     10.93 ns/retrieval   1.00x
+#   classvars + direct names          0.17 ms     11.59 ns/retrieval   1.06x
+#   plain class + direct names        0.17 ms     11.59 ns/retrieval   1.06x
+#   namedtuple + direct names         0.22 ms     14.75 ns/retrieval   1.35x
+#   IntEnum + direct names            0.24 ms     16.07 ns/retrieval   1.47x
+#   Dict + direct names               0.26 ms     17.23 ns/retrieval   1.58x
+#   named dict[name]                  0.49 ms     32.49 ns/retrieval   2.97x
+#   plain class + getattr             0.59 ms     39.25 ns/retrieval   3.59x
+#   named tuple + getattr             0.60 ms     40.19 ns/retrieval   3.68x
+#   slotted instance + getattr        0.61 ms     40.65 ns/retrieval   3.72x
+#   Enum + direct names               1.13 ms     75.39 ns/retrieval   6.90x
+#   Enum[name].value                  1.70 ms    113.66 ns/retrieval  10.40x
+#   IntEnum[name].value               1.83 ms    122.30 ns/retrieval  11.19x
 
 # 20 sequential retrievals
-#   slotted instance + direct names      0.06 ms     10.00 ns/retrieval   1.00x
-#   plain class + direct names        0.07 ms     10.93 ns/retrieval   1.09x
-#   namedtuple + direct names         0.09 ms     15.10 ns/retrieval   1.51x
-#   IntEnum + direct names            0.10 ms     17.15 ns/retrieval   1.71x
-#   Dict + direct names               0.11 ms     17.52 ns/retrieval   1.75x
-#   named dict[name]                  0.19 ms     31.65 ns/retrieval   3.16x
-#   plain class + getattr             0.23 ms     37.73 ns/retrieval   3.77x
-#   named tuple + getattr             0.23 ms     37.97 ns/retrieval   3.80x
-#   slotted instance + getattr        0.24 ms     39.87 ns/retrieval   3.99x
-#   Enum + direct names               0.45 ms     74.72 ns/retrieval   7.47x
-#   Enum[name].value                  0.68 ms    112.62 ns/retrieval  11.26x
-#   IntEnum[name].value               0.73 ms    121.15 ns/retrieval  12.12x
+#   slotted instance + direct names      0.20 ms      9.79 ns/retrieval   1.00x
+#   classvars + direct names          0.21 ms     10.59 ns/retrieval   1.08x
+#   plain class + direct names        0.21 ms     10.60 ns/retrieval   1.08x
+#   namedtuple + direct names         0.29 ms     14.55 ns/retrieval   1.49x
+#   IntEnum + direct names            0.31 ms     15.66 ns/retrieval   1.60x
+#   Dict + direct names               0.33 ms     16.57 ns/retrieval   1.69x
+#   named dict[name]                  0.62 ms     30.99 ns/retrieval   3.17x
+#   plain class + getattr             0.73 ms     36.58 ns/retrieval   3.74x
+#   named tuple + getattr             0.75 ms     37.59 ns/retrieval   3.84x
+#   slotted instance + getattr        0.79 ms     39.30 ns/retrieval   4.01x
+#   Enum + direct names               1.50 ms     74.81 ns/retrieval   7.64x
+#   Enum[name].value                  2.18 ms    109.23 ns/retrieval  11.16x
+#   IntEnum[name].value               2.40 ms    120.06 ns/retrieval  12.26x
 
 # 128 sequential retrievals
-#   slotted instance + direct names      0.50 ms     12.98 ns/retrieval   1.00x
-#   plain class + direct names        0.52 ms     13.65 ns/retrieval   1.05x
-#   namedtuple + direct names         0.70 ms     18.14 ns/retrieval   1.40x
-#   Dict + direct names               0.82 ms     21.47 ns/retrieval   1.65x
-#   IntEnum + direct names            0.89 ms     23.11 ns/retrieval   1.78x
-#   named dict[name]                  1.18 ms     30.66 ns/retrieval   2.36x
-#   named tuple + getattr             1.31 ms     34.03 ns/retrieval   2.62x
-#   plain class + getattr             1.37 ms     35.66 ns/retrieval   2.75x
-#   slotted instance + getattr        1.39 ms     36.18 ns/retrieval   2.79x
-#   Enum + direct names               3.14 ms     81.74 ns/retrieval   6.30x
-#   Enum[name].value                  3.97 ms    103.37 ns/retrieval   7.96x
-#   IntEnum[name].value               4.31 ms    112.21 ns/retrieval   8.64x
+#   slotted instance + direct names      1.75 ms     13.64 ns/retrieval   1.00x
+#   plain class + direct names        1.85 ms     14.43 ns/retrieval   1.06x
+#   classvars + direct names          1.88 ms     14.68 ns/retrieval   1.08x
+#   namedtuple + direct names         2.44 ms     19.04 ns/retrieval   1.40x
+#   Dict + direct names               2.88 ms     22.48 ns/retrieval   1.65x
+#   IntEnum + direct names            2.93 ms     22.90 ns/retrieval   1.68x
+#   named dict[name]                  3.85 ms     30.10 ns/retrieval   2.21x
+#   plain class + getattr             4.05 ms     31.67 ns/retrieval   2.32x
+#   named tuple + getattr             4.15 ms     32.42 ns/retrieval   2.38x
+#   slotted instance + getattr        4.33 ms     33.85 ns/retrieval   2.48x
+#   Enum + direct names              12.53 ms     97.88 ns/retrieval   7.18x
+#   Enum[name].value                 12.94 ms    101.08 ns/retrieval   7.41x
+#   IntEnum[name].value              13.83 ms    108.01 ns/retrieval   7.92x
 """Benchmark numeric field lookup strategies.
 
 Run with, for example:
@@ -67,6 +70,137 @@ NamedTupleFields = namedtuple(
 )
 
 
+class CV:
+    FIELD_0 = 0
+    FIELD_1 = 1
+    FIELD_2 = 2
+    FIELD_3 = 3
+    FIELD_4 = 4
+    FIELD_5 = 5
+    FIELD_6 = 6
+    FIELD_7 = 7
+    FIELD_8 = 8
+    FIELD_9 = 9
+    FIELD_10 = 10
+    FIELD_11 = 11
+    FIELD_12 = 12
+    FIELD_13 = 13
+    FIELD_14 = 14
+    FIELD_15 = 15
+    FIELD_16 = 16
+    FIELD_17 = 17
+    FIELD_18 = 18
+    FIELD_19 = 19
+    FIELD_20 = 20
+    FIELD_21 = 21
+    FIELD_22 = 22
+    FIELD_23 = 23
+    FIELD_24 = 24
+    FIELD_25 = 25
+    FIELD_26 = 26
+    FIELD_27 = 27
+    FIELD_28 = 28
+    FIELD_29 = 29
+    FIELD_30 = 30
+    FIELD_31 = 31
+    FIELD_32 = 32
+    FIELD_33 = 33
+    FIELD_34 = 34
+    FIELD_35 = 35
+    FIELD_36 = 36
+    FIELD_37 = 37
+    FIELD_38 = 38
+    FIELD_39 = 39
+    FIELD_40 = 40
+    FIELD_41 = 41
+    FIELD_42 = 42
+    FIELD_43 = 43
+    FIELD_44 = 44
+    FIELD_45 = 45
+    FIELD_46 = 46
+    FIELD_47 = 47
+    FIELD_48 = 48
+    FIELD_49 = 49
+    FIELD_50 = 50
+    FIELD_51 = 51
+    FIELD_52 = 52
+    FIELD_53 = 53
+    FIELD_54 = 54
+    FIELD_55 = 55
+    FIELD_56 = 56
+    FIELD_57 = 57
+    FIELD_58 = 58
+    FIELD_59 = 59
+    FIELD_60 = 60
+    FIELD_61 = 61
+    FIELD_62 = 62
+    FIELD_63 = 63
+    FIELD_64 = 64
+    FIELD_65 = 65
+    FIELD_66 = 66
+    FIELD_67 = 67
+    FIELD_68 = 68
+    FIELD_69 = 69
+    FIELD_70 = 70
+    FIELD_71 = 71
+    FIELD_72 = 72
+    FIELD_73 = 73
+    FIELD_74 = 74
+    FIELD_75 = 75
+    FIELD_76 = 76
+    FIELD_77 = 77
+    FIELD_78 = 78
+    FIELD_79 = 79
+    FIELD_80 = 80
+    FIELD_81 = 81
+    FIELD_82 = 82
+    FIELD_83 = 83
+    FIELD_84 = 84
+    FIELD_85 = 85
+    FIELD_86 = 86
+    FIELD_87 = 87
+    FIELD_88 = 88
+    FIELD_89 = 89
+    FIELD_90 = 90
+    FIELD_91 = 91
+    FIELD_92 = 92
+    FIELD_93 = 93
+    FIELD_94 = 94
+    FIELD_95 = 95
+    FIELD_96 = 96
+    FIELD_97 = 97
+    FIELD_98 = 98
+    FIELD_99 = 99
+    FIELD_100 = 100
+    FIELD_101 = 101
+    FIELD_102 = 102
+    FIELD_103 = 103
+    FIELD_104 = 104
+    FIELD_105 = 105
+    FIELD_106 = 106
+    FIELD_107 = 107
+    FIELD_108 = 108
+    FIELD_109 = 109
+    FIELD_110 = 110
+    FIELD_111 = 111
+    FIELD_112 = 112
+    FIELD_113 = 113
+    FIELD_114 = 114
+    FIELD_115 = 115
+    FIELD_116 = 116
+    FIELD_117 = 117
+    FIELD_118 = 118
+    FIELD_119 = 119
+    FIELD_120 = 120
+    FIELD_121 = 121
+    FIELD_122 = 122
+    FIELD_123 = 123
+    FIELD_124 = 124
+    FIELD_125 = 125
+    FIELD_126 = 126
+    FIELD_127 = 127
+
+
 class PlainClass:
     pass
 
@@ -79,8 +213,8 @@ class SlottedClass:
     __slots__ = tuple(f"FIELD_{index}" for index in range(FIELD_COUNT))
 
     def __init__(self):
-        for index in range(FIELD_COUNT):
-            setattr(self, f"FIELD_{index}", index)
+        for index, name in enumerate(self.__slots__):
+            setattr(self, name, index)
 
 
 SLOTTED_CLASS = SlottedClass()
@@ -490,6 +624,186 @@ def retrieve_plain_direct_128(_start, _n_slots):
             PlainClass.FIELD_125,
             PlainClass.FIELD_126,
             PlainClass.FIELD_127,
+        )
+    )
+
+
+def retrieve_classvars_direct_15(_start, _n_slots):
+    return (
+        CV.FIELD_0
+        + CV.FIELD_1
+        + CV.FIELD_2
+        + CV.FIELD_3
+        + CV.FIELD_4
+        + CV.FIELD_5
+        + CV.FIELD_6
+        + CV.FIELD_7
+        + CV.FIELD_8
+        + CV.FIELD_9
+        + CV.FIELD_10
+        + CV.FIELD_11
+        + CV.FIELD_12
+        + CV.FIELD_13
+        + CV.FIELD_14
+    )
+
+
+def retrieve_classvars_direct_20(_start, _n_slots):
+    return (
+        CV.FIELD_0
+        + CV.FIELD_1
+        + CV.FIELD_2
+        + CV.FIELD_3
+        + CV.FIELD_4
+        + CV.FIELD_5
+        + CV.FIELD_6
+        + CV.FIELD_7
+        + CV.FIELD_8
+        + CV.FIELD_9
+        + CV.FIELD_10
+        + CV.FIELD_11
+        + CV.FIELD_12
+        + CV.FIELD_13
+        + CV.FIELD_14
+        + CV.FIELD_15
+        + CV.FIELD_16
+        + CV.FIELD_17
+        + CV.FIELD_18
+        + CV.FIELD_19
+    )
+
+
+def retrieve_classvars_direct_128(_start, _n_slots):
+    return sum(
+        (
+            CV.FIELD_0,
+            CV.FIELD_1,
+            CV.FIELD_2,
+            CV.FIELD_3,
+            CV.FIELD_4,
+            CV.FIELD_5,
+            CV.FIELD_6,
+            CV.FIELD_7,
+            CV.FIELD_8,
+            CV.FIELD_9,
+            CV.FIELD_10,
+            CV.FIELD_11,
+            CV.FIELD_12,
+            CV.FIELD_13,
+            CV.FIELD_14,
+            CV.FIELD_15,
+            CV.FIELD_16,
+            CV.FIELD_17,
+            CV.FIELD_18,
+            CV.FIELD_19,
+            CV.FIELD_20,
+            CV.FIELD_21,
+            CV.FIELD_22,
+            CV.FIELD_23,
+            CV.FIELD_24,
+            CV.FIELD_25,
+            CV.FIELD_26,
+            CV.FIELD_27,
+            CV.FIELD_28,
+            CV.FIELD_29,
+            CV.FIELD_30,
+            CV.FIELD_31,
+            CV.FIELD_32,
+            CV.FIELD_33,
+            CV.FIELD_34,
+            CV.FIELD_35,
+            CV.FIELD_36,
+            CV.FIELD_37,
+            CV.FIELD_38,
+            CV.FIELD_39,
+            CV.FIELD_40,
+            CV.FIELD_41,
+            CV.FIELD_42,
+            CV.FIELD_43,
+            CV.FIELD_44,
+            CV.FIELD_45,
+            CV.FIELD_46,
+            CV.FIELD_47,
+            CV.FIELD_48,
+            CV.FIELD_49,
+            CV.FIELD_50,
+            CV.FIELD_51,
+            CV.FIELD_52,
+            CV.FIELD_53,
+            CV.FIELD_54,
+            CV.FIELD_55,
+            CV.FIELD_56,
+            CV.FIELD_57,
+            CV.FIELD_58,
+            CV.FIELD_59,
+            CV.FIELD_60,
+            CV.FIELD_61,
+            CV.FIELD_62,
+            CV.FIELD_63,
+            CV.FIELD_64,
+            CV.FIELD_65,
+            CV.FIELD_66,
+            CV.FIELD_67,
+            CV.FIELD_68,
+            CV.FIELD_69,
+            CV.FIELD_70,
+            CV.FIELD_71,
+            CV.FIELD_72,
+            CV.FIELD_73,
+            CV.FIELD_74,
+            CV.FIELD_75,
+            CV.FIELD_76,
+            CV.FIELD_77,
+            CV.FIELD_78,
+            CV.FIELD_79,
+            CV.FIELD_80,
+            CV.FIELD_81,
+            CV.FIELD_82,
+            CV.FIELD_83,
+            CV.FIELD_84,
+            CV.FIELD_85,
+            CV.FIELD_86,
+            CV.FIELD_87,
+            CV.FIELD_88,
+            CV.FIELD_89,
+            CV.FIELD_90,
+            CV.FIELD_91,
+            CV.FIELD_92,
+            CV.FIELD_93,
+            CV.FIELD_94,
+            CV.FIELD_95,
+            CV.FIELD_96,
+            CV.FIELD_97,
+            CV.FIELD_98,
+            CV.FIELD_99,
+            CV.FIELD_100,
+            CV.FIELD_101,
+            CV.FIELD_102,
+            CV.FIELD_103,
+            CV.FIELD_104,
+            CV.FIELD_105,
+            CV.FIELD_106,
+            CV.FIELD_107,
+            CV.FIELD_108,
+            CV.FIELD_109,
+            CV.FIELD_110,
+            CV.FIELD_111,
+            CV.FIELD_112,
+            CV.FIELD_113,
+            CV.FIELD_114,
+            CV.FIELD_115,
+            CV.FIELD_116,
+            CV.FIELD_117,
+            CV.FIELD_118,
+            CV.FIELD_119,
+            CV.FIELD_120,
+            CV.FIELD_121,
+            CV.FIELD_122,
+            CV.FIELD_123,
+            CV.FIELD_124,
+            CV.FIELD_125,
+            CV.FIELD_126,
+            CV.FIELD_127,
         )
     )
 
@@ -1219,6 +1533,10 @@ DIRECT_METHODS = {
         (
             "plain class + direct names",
             globals()[f"retrieve_plain_direct_{n_slots}"],
+        ),
+        (
+            "classvars + direct names",
+            globals()[f"retrieve_classvars_direct_{n_slots}"],
         ),
         (
             "slotted instance + direct names",

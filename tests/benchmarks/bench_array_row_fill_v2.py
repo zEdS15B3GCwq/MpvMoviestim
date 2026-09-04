@@ -2,40 +2,40 @@
 # cycles=1,000, repeats=3
 
 # 15 values per row
-#   local array + slice copy            1.35 ms     89.75 ns/value   1.00x
-#   preallocated array + slice copy      1.48 ms     98.95 ns/value   1.10x
-#   local preallocated array + slice copy      1.48 ms     98.97 ns/value   1.10x
-#   repeated array allocation + slice copy      1.64 ms    109.05 ns/value   1.21x
-#   direct target indexed writes        1.69 ms    112.45 ns/value   1.25x
-#   scratch list + indexed copy         1.98 ms    131.93 ns/value   1.47x
-#   preallocated array + indexed copy      2.50 ms    166.35 ns/value   1.85x
+#   local array + slice copy            1.38 ms     91.99 ns/value   1.00x
+#   preallocated array + slice copy      1.44 ms     96.03 ns/value   1.04x
+#   local preallocated array + slice copy      1.45 ms     96.35 ns/value   1.05x
+#   repeated array allocation + slice copy      1.59 ms    106.19 ns/value   1.15x
+#   direct target indexed writes        1.67 ms    111.26 ns/value   1.21x
+#   scratch list + indexed copy         1.95 ms    129.83 ns/value   1.41x
+#   preallocated array + indexed copy      2.45 ms    163.58 ns/value   1.78x
 
 # 20 values per row
-#   local array + slice copy            1.26 ms     63.15 ns/value   1.00x
-#   local preallocated array + slice copy      1.33 ms     66.70 ns/value   1.06x
-#   repeated array allocation + slice copy      1.47 ms     73.34 ns/value   1.16x
-#   preallocated array + slice copy      1.49 ms     74.27 ns/value   1.18x
-#   direct target indexed writes        1.68 ms     84.22 ns/value   1.33x
-#   scratch list + indexed copy         1.93 ms     96.33 ns/value   1.53x
-#   preallocated array + indexed copy      2.48 ms    124.16 ns/value   1.97x
+#   local array + slice copy            1.23 ms     61.72 ns/value   1.00x
+#   local preallocated array + slice copy      1.29 ms     64.61 ns/value   1.05x
+#   repeated array allocation + slice copy      1.43 ms     71.29 ns/value   1.15x
+#   preallocated array + slice copy      1.43 ms     71.60 ns/value   1.16x
+#   direct target indexed writes        1.67 ms     83.59 ns/value   1.35x
+#   scratch list + indexed copy         1.95 ms     97.51 ns/value   1.58x
+#   preallocated array + indexed copy      2.45 ms    122.73 ns/value   1.99x
 
 # 128 values per row
-#   local array + slice copy            1.20 ms      9.40 ns/value   1.00x
-#   local preallocated array + slice copy      1.33 ms     10.40 ns/value   1.11x
-#   preallocated array + slice copy      1.34 ms     10.43 ns/value   1.11x
-#   repeated array allocation + slice copy      1.47 ms     11.45 ns/value   1.22x
-#   direct target indexed writes        1.51 ms     11.80 ns/value   1.26x
-#   scratch list + indexed copy         1.75 ms     13.66 ns/value   1.45x
-#   preallocated array + indexed copy      2.25 ms     17.59 ns/value   1.87x
+#   local array + slice copy            1.21 ms      9.48 ns/value   1.00x
+#   local preallocated array + slice copy      1.30 ms     10.15 ns/value   1.07x
+#   preallocated array + slice copy      1.31 ms     10.22 ns/value   1.08x
+#   repeated array allocation + slice copy      1.45 ms     11.33 ns/value   1.19x
+#   direct target indexed writes        1.49 ms     11.68 ns/value   1.23x
+#   scratch list + indexed copy         1.76 ms     13.72 ns/value   1.45x
+#   preallocated array + indexed copy      2.20 ms     17.20 ns/value   1.81x
 
 # 512 values per row
-#   local array + slice copy            1.22 ms      2.39 ns/value   1.00x
-#   preallocated array + slice copy      1.33 ms      2.60 ns/value   1.09x
-#   local preallocated array + slice copy      1.33 ms      2.60 ns/value   1.09x
-#   repeated array allocation + slice copy      1.46 ms      2.85 ns/value   1.20x
-#   direct target indexed writes        1.51 ms      2.94 ns/value   1.23x
-#   scratch list + indexed copy         1.74 ms      3.39 ns/value   1.42x
-#   preallocated array + indexed copy      2.22 ms      4.33 ns/value   1.82x
+#   local array + slice copy            1.22 ms      2.38 ns/value   1.00x
+#   preallocated array + slice copy      1.29 ms      2.53 ns/value   1.06x
+#   local preallocated array + slice copy      1.30 ms      2.53 ns/value   1.07x
+#   repeated array allocation + slice copy      1.43 ms      2.80 ns/value   1.18x
+#   direct target indexed writes        1.51 ms      2.94 ns/value   1.24x
+#   scratch list + indexed copy         1.76 ms      3.43 ns/value   1.44x
+#   preallocated array + indexed copy      2.18 ms      4.26 ns/value   1.79x
 """Benchmark ways to fill rows in a pre-allocated ``array('d')``.
 
 Run with, for example:
@@ -53,8 +53,8 @@ class Fields:
     __slots__ = tuple(f"FIELD_{index}" for index in range(FIELD_COUNT))
 
     def __init__(self):
-        for index in range(FIELD_COUNT):
-            setattr(self, f"FIELD_{index}", index)
+        for index, name in enumerate(self.__slots__):
+            setattr(self, name, index)
 
 
 F = Fields()
