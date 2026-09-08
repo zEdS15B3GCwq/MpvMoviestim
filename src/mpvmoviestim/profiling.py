@@ -87,7 +87,7 @@ class Worker_Timestamp_Indices:
         "WAITSYNC_BLIT_T0",  # CPU-side span around glWaitSync(blit fence)
         "WAITSYNC_BLIT_T1",
         "WAITSYNC_BLIT_STATE",  # zero-timeout poll: OpenGL values
-        # TODO: translate to 1=already done, 2=not ready, 3=failed
+        # TODO: defer translating to 1=already done, 2=not ready, 3=failed
         "RENDER_T0",  # ctx.render() span (CPU-side command issue time)
         "RENDER_T1",
         "FENCE_POST_T",  # render fence posted (instant)
