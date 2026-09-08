@@ -1,41 +1,14 @@
-# ❯  python .\bench_array_row_fill_v2.py --cycles 1000 --repeats 3
-# cycles=1,000, repeats=3
+# ❯  python3.12 .\bench_array_row_fill_v2.py                                                                       took 4.877s  󰁽87 
+# rows=10,000, repeats=5
 
-# 15 values per row
-#   local array + slice copy            1.38 ms     91.99 ns/value   1.00x
-#   preallocated array + slice copy      1.44 ms     96.03 ns/value   1.04x
-#   local preallocated array + slice copy      1.45 ms     96.35 ns/value   1.05x
-#   repeated array allocation + slice copy      1.59 ms    106.19 ns/value   1.15x
-#   direct target indexed writes        1.67 ms    111.26 ns/value   1.21x
-#   scratch list + indexed copy         1.95 ms    129.83 ns/value   1.41x
-#   preallocated array + indexed copy      2.45 ms    163.58 ns/value   1.78x
-
-# 20 values per row
-#   local array + slice copy            1.23 ms     61.72 ns/value   1.00x
-#   local preallocated array + slice copy      1.29 ms     64.61 ns/value   1.05x
-#   repeated array allocation + slice copy      1.43 ms     71.29 ns/value   1.15x
-#   preallocated array + slice copy      1.43 ms     71.60 ns/value   1.16x
-#   direct target indexed writes        1.67 ms     83.59 ns/value   1.35x
-#   scratch list + indexed copy         1.95 ms     97.51 ns/value   1.58x
-#   preallocated array + indexed copy      2.45 ms    122.73 ns/value   1.99x
-
-# 128 values per row
-#   local array + slice copy            1.21 ms      9.48 ns/value   1.00x
-#   local preallocated array + slice copy      1.30 ms     10.15 ns/value   1.07x
-#   preallocated array + slice copy      1.31 ms     10.22 ns/value   1.08x
-#   repeated array allocation + slice copy      1.45 ms     11.33 ns/value   1.19x
-#   direct target indexed writes        1.49 ms     11.68 ns/value   1.23x
-#   scratch list + indexed copy         1.76 ms     13.72 ns/value   1.45x
-#   preallocated array + indexed copy      2.20 ms     17.20 ns/value   1.81x
-
-# 512 values per row
-#   local array + slice copy            1.22 ms      2.38 ns/value   1.00x
-#   preallocated array + slice copy      1.29 ms      2.53 ns/value   1.06x
-#   local preallocated array + slice copy      1.30 ms      2.53 ns/value   1.07x
-#   repeated array allocation + slice copy      1.43 ms      2.80 ns/value   1.18x
-#   direct target indexed writes        1.51 ms      2.94 ns/value   1.24x
-#   scratch list + indexed copy         1.76 ms      3.43 ns/value   1.44x
-#   preallocated array + indexed copy      2.18 ms      4.26 ns/value   1.79x
+# 25 values per row
+#   local array + slice copy           21.11 ms     84.45 ns/value   1.00x
+#   preallocated array + slice copy     23.94 ms     95.76 ns/value   1.13x
+#   repeated array allocation + slice copy     26.18 ms    104.72 ns/value   1.24x
+#   local preallocated array + slice copy     26.25 ms    105.01 ns/value   1.24x
+#   direct target indexed writes       29.00 ms    115.99 ns/value   1.37x
+#   scratch list + indexed copy        32.50 ms    129.98 ns/value   1.54x
+#   preallocated array + indexed copy     40.89 ms    163.55 ns/value   1.94x
 """Benchmark ways to fill rows in a pre-allocated ``array('d')``.
 
 Run with, for example:
@@ -363,25 +336,23 @@ def benchmark(method, numrows):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--cycles", type=int, default=10_000)
+    parser.add_argument("--rows", type=int, default=10_000)
     parser.add_argument("--repeats", type=int, default=5)
     args = parser.parse_args()
-    sizes = (15, 20, 128, 512)
 
-    print(f"cycles={args.cycles:,}, repeats={args.repeats}")
-    for n_slots in sizes:
-        for _, method in METHODS:
-            check(method)
-        results = []
-        for name, method in METHODS:
-            samples = [benchmark(method, args.cycles) for _ in range(args.repeats)]
-            results.append((min(samples), name))
-        fastest = min(value for value, _ in results)
-        print(f"\n{n_slots} values per row")
-        for elapsed, name in sorted(results):
-            print(
-                f"  {name:30} {elapsed * 1e3:9.2f} ms  {elapsed / args.cycles / n_slots * 1e9:8.2f} ns/value  {elapsed / fastest:5.2f}x"
-            )
+    print(f"rows={args.rows:,}, repeats={args.repeats}")
+    for _, method in METHODS:
+        check(method)
+    results = []
+    for name, method in METHODS:
+        samples = [benchmark(method, args.rows) for _ in range(args.repeats)]
+        results.append((min(samples), name))
+    fastest = min(value for value, _ in results)
+    print(f"\n{FIELD_COUNT} values per row")
+    for elapsed, name in sorted(results):
+        print(
+            f"  {name:30} {elapsed * 1e3:9.2f} ms  {elapsed / args.rows / FIELD_COUNT * 1e9:8.2f} ns/value  {elapsed / fastest:5.2f}x"
+        )
 
 
 if __name__ == "__main__":
