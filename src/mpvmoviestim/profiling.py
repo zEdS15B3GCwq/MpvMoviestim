@@ -117,7 +117,7 @@ class Render_Timestamp_Indices:
     BLIT_T0: int
     BLIT_T1: int
     FENCE_POST_T: int
-    GPU_WAIT: int
+    WAIT_DONE_DUR: int
     ITER_DONE_T: int
     DRAW_EXIT_T: int
     REPORT_SWAP_T: int
@@ -132,10 +132,11 @@ class Render_Timestamp_Indices:
         "WAITSYNC_RENDER_T0",  # CPU-side span around glWaitSync(render fence)
         "WAITSYNC_RENDER_T1",
         "WAITSYNC_RENDER_STATE",  # zero-timeout poll: 1=already done, 2=not ready, 3=failed
+        # TODO: defer translating to 1=already done, 2=not ready, 3=failed
         "BLIT_T0",  # blit span (CPU-side command issue time)
         "BLIT_T1",
         "FENCE_POST_T",  # blit fence posted (instant)
-        "GPU_WAIT",  # blocking clientWaitSync duration on private done-fence (-1: timeout)
+        "WAIT_DONE_DUR",  # blocking clientWaitSync duration on private done-fence (-1: timeout)
         "ITER_DONE_T",  # ~when the GPU finished this iteration's blit (instant)
         "DRAW_EXIT_T",  # draw() finished (instant)
         "REPORT_SWAP_T",  # report_swap() called (instant, stamped into current row)
@@ -538,7 +539,7 @@ class Profiler:
             "waitsync_render_poll",
             Render_Timestamp_Indices.GPU_BLIT,
             Render_Timestamp_Indices.BLIT_T0,
-            Render_Timestamp_Indices.GPU_WAIT,
+            Render_Timestamp_Indices.WAIT_DONE_DUR,
             Render_Timestamp_Indices.ITER_DONE_T,
         )
         events.sort(key=lambda e: e[0])

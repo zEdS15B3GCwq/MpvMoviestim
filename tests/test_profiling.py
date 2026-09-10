@@ -201,7 +201,7 @@ class TestGetEvents:
         mb = prof.main.buf
         prof.main.next_iter()
         mb[Render_Timestamp_Indices.ITER_DONE_T] = 100.0
-        mb[Render_Timestamp_Indices.GPU_WAIT] = -1.0  # timeout/failure encoding
+        mb[Render_Timestamp_Indices.WAIT_DONE_DUR] = -1.0  # timeout/failure encoding
         events = prof.get_events()
         names = [e[2] for e in events]
         assert "gpu_wait_timeout" in names
