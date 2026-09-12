@@ -13,22 +13,22 @@ import pytest
 
 from mpvmoviestim.profiling import (
     Profiler,
+    Recorder,
     Render_Timestamp_Indices,
-    ThreadRecorder,
     Worker_Timestamp_Indices,
 )
 
 
 class TestThreadRecorder:
     def test_row_advancement(self):
-        rec = ThreadRecorder(capacity=3, n_slots=2)
+        rec = Recorder(capacity=3, n_slots=2)
         assert rec.next_iter() == 0
         assert rec.next_iter() == 2
         assert rec.next_iter() == 4
         assert rec.rows == 3
 
     def test_stop_when_full(self):
-        rec = ThreadRecorder(capacity=2, n_slots=2)
+        rec = Recorder(capacity=2, n_slots=2)
         assert rec.next_iter() == 0
         assert rec.next_iter() == 2
         assert rec.next_iter() == -1
@@ -38,12 +38,12 @@ class TestThreadRecorder:
         assert rec.rows == 2
 
     def test_zero_capacity_is_inactive_immediately(self):
-        rec = ThreadRecorder(capacity=0, n_slots=4)
+        rec = Recorder(capacity=0, n_slots=4)
         assert rec.next_iter() == -1
         assert rec.active is False
 
     def test_buffer_preallocated_zeroed(self):
-        rec = ThreadRecorder(capacity=5, n_slots=3)
+        rec = Recorder(capacity=5, n_slots=3)
         assert len(rec.buf) == 15
         assert all(v == 0.0 for v in rec.buf)
 
@@ -200,7 +200,7 @@ class TestGetEvents:
         prof = self._make_profiler()
         mb = prof.main.buf
         prof.main.next_iter()
-        mb[Render_Timestamp_Indices.ITER_DONE_T] = 100.0
+        mb[Render_Timestamp_Indices.DRAW_EXIT_T] = 100.0
         mb[Render_Timestamp_Indices.WAIT_DONE_DUR] = -1.0  # timeout/failure encoding
         events = prof.get_events()
         names = [e[2] for e in events]
@@ -268,7 +268,7 @@ class TestRecorderPerfSmoke:
     """Sanity check that the hot-path write pattern is allocation-free and fast."""
 
     def test_stamp_write_speed(self):
-        rec = ThreadRecorder(capacity=10_000, n_slots=Worker_Timestamp_Indices.COUNT)
+        rec = Recorder(capacity=10_000, n_slots=Worker_Timestamp_Indices.COUNT)
         buf = rec.buf
         t0 = perf_counter()
         for _ in range(10_000):

@@ -118,9 +118,7 @@ class Render_Timestamp_Indices:
     BLIT_T1: int
     FENCE_POST_T: int
     WAIT_DONE_DUR: int
-    ITER_DONE_T: int
     DRAW_EXIT_T: int
-    REPORT_SWAP_T: int
     GPU_BLIT: int
 
     __slots__ = (  # noqa: RUF023
@@ -137,9 +135,7 @@ class Render_Timestamp_Indices:
         "BLIT_T1",
         "FENCE_POST_T",  # blit fence posted (instant)
         "WAIT_DONE_DUR",  # blocking clientWaitSync duration on private done-fence (-1: timeout)
-        "ITER_DONE_T",  # ~when the GPU finished this iteration's blit (instant)
-        "DRAW_EXIT_T",  # draw() finished (instant)
-        "REPORT_SWAP_T",  # report_swap() called (instant, stamped into current row)
+        "DRAW_EXIT_T",  # ~when the GPU finished this iteration's blit (instant)
         "GPU_BLIT",  # GL_TIME_ELAPSED duration of the blit (seconds, filled late)
     )
 
@@ -148,83 +144,26 @@ class Render_Timestamp_Indices:
             setattr(self, name, index)
 
 
-# Slots holding genuine timestamps (used to find the timeline anchor t0 and
-# to skip zero/unset slots at retrieval). Duration/state/index slots are
-# deliberately excluded.
-_WORKER_TS_SLOTS = (
-    "UPDATE_T0",
-    "UPDATE_T1",
-    "LOCK_T0",
-    "LOCK_T1",
-    "WAITSYNC_BLIT_T0",
-    "WAITSYNC_BLIT_T1",
-    "RENDER_T0",
-    "RENDER_T1",
-    "FENCE_POST_T",
-    "FLIP_REQUEST_T",
-    "SET_DONE_T",
-    "ITER_DONE_T",
-)
-_MAIN_TS_SLOTS = (
-    "DRAW_ENTRY_T",
-    "LOCK_T0",
-    "LOCK_T1",
-    "CPU_WAIT_T0",
-    "CPU_WAIT_T1",
-    "WAITSYNC_RENDER_T0",
-    "WAITSYNC_RENDER_T1",
-    "BLIT_T0",
-    "BLIT_T1",
-    "FENCE_POST_T",
-    "ITER_DONE_T",
-    "DRAW_EXIT_T",
-    "REPORT_SWAP_T",
-)
-
-_WORKER_SPANS = (
-    ("update", Worker_Timestamp_Indices.UPDATE_T0, Worker_Timestamp_Indices.UPDATE_T1),
-    ("lock", Worker_Timestamp_Indices.LOCK_T0, Worker_Timestamp_Indices.LOCK_T1),
-    (
-        "waitsync_blit",
-        Worker_Timestamp_Indices.WAITSYNC_BLIT_T0,
-        Worker_Timestamp_Indices.WAITSYNC_BLIT_T1,
-    ),
-    (
-        "render_cpu",
-        Worker_Timestamp_Indices.RENDER_T0,
-        Worker_Timestamp_Indices.RENDER_T1,
-    ),
-)
-_WORKER_INSTANTS = (
-    ("fence_post", Worker_Timestamp_Indices.FENCE_POST_T),
-    ("buffer_flip", Worker_Timestamp_Indices.FLIP_T),
-    ("render_done_set", Worker_Timestamp_Indices.SET_DONE_T),
-)
-_MAIN_SPANS = (
-    ("lock", Render_Timestamp_Indices.LOCK_T0, Render_Timestamp_Indices.LOCK_T1),
-    (
-        "cpu_wait_worker",
-        Render_Timestamp_Indices.CPU_WAIT_T0,
-        Render_Timestamp_Indices.CPU_WAIT_T1,
-    ),
-    (
-        "waitsync_render",
-        Render_Timestamp_Indices.WAITSYNC_RENDER_T0,
-        Render_Timestamp_Indices.WAITSYNC_RENDER_T1,
-    ),
-    ("blit_cpu", Render_Timestamp_Indices.BLIT_T0, Render_Timestamp_Indices.BLIT_T1),
-)
-_MAIN_INSTANTS = (
-    ("draw_entry", Render_Timestamp_Indices.DRAW_ENTRY_T),
-    ("fence_post", Render_Timestamp_Indices.FENCE_POST_T),
-    ("draw_exit", Render_Timestamp_Indices.DRAW_EXIT_T),
-    ("report_swap", Render_Timestamp_Indices.REPORT_SWAP_T),
-)
-
 _POLL_STATE_NAMES = {1.0: "ready", 2.0: "not_ready", 3.0: "failed"}
 
 
-class ThreadRecorder:
+class Update_Callback_Indices:
+    """Update callback timestamp indices (one row per callback)."""
+
+    UPDATE_T: int
+    IS_TRIGGER: int
+
+    __slots__ = (  # noqa: RUF023
+        "UPDATE_T",  # update() called (instant)
+        "IS_TRIGGER",  # did the callback wake the worker thread?
+    )
+
+    def __init__(self):
+        for index, name in enumerate(self.__slots__):
+            setattr(self, name, index)
+
+
+class Recorder:
     """Fixed-capacity per-thread timestamp recorder.
 
     Rows are iterations; each row has ``stride`` slots. Writes in the hot
@@ -234,7 +173,7 @@ class ThreadRecorder:
     recorder becomes permanently inactive (stop-when-full policy).
     """
 
-    __slots__ = ("buf", "stride", "base", "rows", "active")
+    __slots__ = ("buf", "stride", "base", "rows", "active")  # noqa: RUF023
 
     def __init__(self, capacity: int, n_slots: int) -> None:
         self.stride = n_slots
@@ -270,7 +209,7 @@ class GpuTimerPool:
 
     POOL_SIZE = 8
 
-    def __init__(self, recorder: ThreadRecorder, slot: int) -> None:
+    def __init__(self, recorder: Recorder, slot: int) -> None:
         self._rec = recorder
         self._slot = slot
         self._free: list[int] = []
@@ -369,8 +308,8 @@ class Profiler:
     the recordings into a single sorted timeline at retrieval time."""
 
     def __init__(self, capacity: int = 10_000, wake_factor: int = 8) -> None:
-        self.worker = ThreadRecorder(capacity, Worker_Timestamp_Indices.COUNT)
-        self.main = ThreadRecorder(capacity, Render_Timestamp_Indices.COUNT)
+        self.worker = Recorder(capacity, Worker_Timestamp_Indices.COUNT)
+        self.main = Recorder(capacity, Render_Timestamp_Indices.COUNT)
         self.worker_gpu = GpuTimerPool(self.worker, Worker_Timestamp_Indices.GPU_RENDER)
         self.main_gpu = GpuTimerPool(self.main, Render_Timestamp_Indices.GPU_BLIT)
         # Appended by mpv's update callback thread, drained by the worker.
@@ -401,7 +340,7 @@ class Profiler:
         buf[base + Worker_Timestamp_Indices.WAKE_COUNT] = float(count)
 
     @staticmethod
-    def _first_ts(rec: ThreadRecorder, slots: tuple[int, ...]) -> float:
+    def _first_ts(rec: Recorder, slots: tuple[int, ...]) -> float:
         """First nonzero timestamp in the recorder (rows are chronological)."""
         buf = rec.buf
         lim = rec.rows * rec.stride
@@ -428,7 +367,7 @@ class Profiler:
     def _emit_rows(
         events: list[tuple[float, str, str, float]],
         t0: float,
-        rec: ThreadRecorder,
+        rec: Recorder,
         thread: str,
         gpu_thread: str,
         gpu_name: str,
@@ -540,7 +479,7 @@ class Profiler:
             Render_Timestamp_Indices.GPU_BLIT,
             Render_Timestamp_Indices.BLIT_T0,
             Render_Timestamp_Indices.WAIT_DONE_DUR,
-            Render_Timestamp_Indices.ITER_DONE_T,
+            Render_Timestamp_Indices.DRAW_EXIT_T,
         )
         events.sort(key=lambda e: e[0])
         return events

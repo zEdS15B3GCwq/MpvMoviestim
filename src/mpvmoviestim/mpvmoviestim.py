@@ -631,6 +631,7 @@ class MpvMoviestim:
             ts.profiler.wake_times.append(
                 (perf_counter(), not ts.render_trigger.is_set())
             )
+            # TODO: pre-allocate wake times, integrate afterwards
         ts.render_trigger.set()
 
     def _render_worker(self) -> None:
@@ -650,10 +651,10 @@ class MpvMoviestim:
         """
         ts = self._threading_state
         profiling_enabled = ts.profiler is not None
+        profiler_gpu = ts.profiler.worker_gpu if ts.profiler is not None else None
         if profiling_enabled:
             assert ts.profiler is not None
             profiler_cpu = ts.profiler.worker
-            profiler_gpu = ts.profiler.worker_gpu
             cpu_record = profiler_cpu.buf
             indices = Worker_Timestamp_Indices()
             done_fence = None
@@ -699,11 +700,17 @@ class MpvMoviestim:
             ts.render_trigger.wait()  # wait until the update callback is called
             ts.render_trigger.clear()
 
+            # harvest GPU results from previous iterations (do even after profiler full)
+            if profiler_gpu is not None:
+                profiler_gpu.collect()
+
             if profiling_enabled:
                 base = profiler_cpu.next_iter()
-                # profiler.drain_wakes(buf, base)
-                profiler_gpu.collect()  # harvest GPU results from previous iterations
-                cpu_record[base + indices.UPDATE_T0] = perf_counter()
+                # disable further profiling data collection if buffer is full
+                if base < 0:
+                    profiling_enabled = False
+                else:
+                    cpu_record[base + indices.UPDATE_T0] = perf_counter()
 
             # drain pending MPV updates
             update_result = self._mpv_render_ctx.update()
@@ -745,14 +752,14 @@ class MpvMoviestim:
                     cpu_record[base + indices.WAITSYNC_BLIT_T0] = perf_counter()
                     # zero-timeout poll: was the main thread's blit already done?
                     st = gl.glClientWaitSync(blit_fence, 0, 0)
-                    cpu_record[base + indices.WAITSYNC_BLIT_STATE] = st
-                    # cpu_record[base + indices.WAITSYNC_BLIT_STATE] = (
-                    #     1.0
-                    #     if st in (gl.GL_ALREADY_SIGNALED, gl.GL_CONDITION_SATISFIED)
-                    #     else 2.0
-                    #     if st == gl.GL_TIMEOUT_EXPIRED
-                    #     else 3.0
-                    # )
+                    # cpu_record[base + indices.WAITSYNC_BLIT_STATE] = st
+                    cpu_record[base + indices.WAITSYNC_BLIT_STATE] = (
+                        1.0
+                        if st in (gl.GL_ALREADY_SIGNALED, gl.GL_CONDITION_SATISFIED)
+                        else 2.0
+                        if st == gl.GL_TIMEOUT_EXPIRED
+                        else 3.0
+                    )
                 gl.glWaitSync(blit_fence, 0, gl.GL_TIMEOUT_IGNORED)
                 # TODO: use timeout to avoid possible deadlock
                 gl.glDeleteSync(blit_fence)
@@ -1065,11 +1072,16 @@ class MpvMoviestim:
             profiler_gpu = self._profiler.main_gpu
             cpu_record = profiler_cpu.buf
             indices = Render_Timestamp_Indices()
+
+            # GPU-side timestamps need to be collected
+            profiler_gpu.collect()  # harvest GPU results from previous iterations
             done_fence = None
+            base = profiler_cpu.next_iter()
+            # disable timestamp collection if profiler buffer is full
+            if base < 0:
+                profiling_enabled = False
 
         if profiling_enabled:
-            base = profiler_cpu.next_iter()
-            profiler_gpu.collect()  # harvest GPU results from previous iterations
             cpu_record[base + indices.DRAW_ENTRY_T] = perf_counter()
 
         # Read the index of the most recently completed worker frame.
@@ -1125,8 +1137,16 @@ class MpvMoviestim:
             if profiling_enabled:
                 cpu_record[base + indices.WAITSYNC_RENDER_T0] = perf_counter()
                 # zero-timeout poll: was the worker's render already done?
-                cpu_record[base + indices.WAITSYNC_RENDER_STATE] = gl.glClientWaitSync(
-                    render_fence, 0, 0
+                # cpu_record[base + indices.WAITSYNC_RENDER_STATE] = gl.glClientWaitSync(
+                #     render_fence, 0, 0
+                # )
+                st = gl.glClientWaitSync(render_fence, 0, 0)
+                cpu_record[base + indices.WAITSYNC_RENDER_STATE] = (
+                    1.0
+                    if st in (gl.GL_ALREADY_SIGNALED, gl.GL_CONDITION_SATISFIED)
+                    else 2.0
+                    if st == gl.GL_TIMEOUT_EXPIRED
+                    else 3.0
                 )
             gl.glWaitSync(render_fence, 0, gl.GL_TIMEOUT_IGNORED)
             gl.glDeleteSync(render_fence)
@@ -1180,10 +1200,7 @@ class MpvMoviestim:
                 if st in (gl.GL_ALREADY_SIGNALED, gl.GL_CONDITION_SATISFIED)
                 else -1.0
             )
-            cpu_record[base + indices.ITER_DONE_T] = tw1
-            cpu_record[base + indices.DRAW_EXIT_T] = perf_counter()
-
-        # self._report_swap = True
+            cpu_record[base + indices.DRAW_EXIT_T] = tw1
 
     @_state_guard(allowed_state=MpvMoviestimState.PLAYING)
     def report_swap(self) -> None:
@@ -1205,13 +1222,7 @@ class MpvMoviestim:
         mode, or to not call it ever if audio-sync is to be used.
         Ensuring this is entirely left to the user.
         """
-        # if self._report_swap:
-        rec = self._profiler.main if self._profiler is not None else None
-        if rec is not None and rec.active and rec.base >= 0:
-            # stamp into the current draw() row (base advances on the next draw)
-            rec.buf[rec.base + Render_Timestamp_Indices.REPORT_SWAP_T] = perf_counter()
         self._mpv_render_ctx.report_swap()
-        # self._report_swap = False
 
     def get_profiling_data(self) -> list[tuple[float, str, str, float]]:
         """Return the merged, timestamp-sorted profiling event list.
