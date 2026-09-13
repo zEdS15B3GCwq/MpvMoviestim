@@ -163,26 +163,25 @@ class Update_Callback_Indices:
             setattr(self, name, index)
 
 
-class Recorder:
-    """Fixed-capacity per-thread timestamp recorder.
+class Buffer:
+    """Fixed-capacity 2D array allocator.
 
-    Rows are iterations; each row has ``stride`` slots. Writes in the hot
-    path are done inline by the caller as ``buf[base + SLOT] = perf_counter()``
-    with ``buf``/``base`` hoisted to locals; this class only manages row
-    advancement. When the buffer is full, ``next_iter()`` returns -1 and the
-    recorder becomes permanently inactive (stop-when-full policy).
+    Pre-allocates a (nrows x nslots) size 2D array `buf` for storing profiling
+    data. The class keeps track of the current row (`base`). Writes should be
+    performed as `buf[base + SLOT] = value`. `next_row()` advances to the next
+    row, and returns -1 when the buffer is full.
     """
 
-    __slots__ = ("buf", "stride", "base", "rows", "active")  # noqa: RUF023
+    __slots__ = ("buf", "stride", "base", "rows_written", "active")  # noqa: RUF023
 
-    def __init__(self, capacity: int, n_slots: int) -> None:
-        self.stride = n_slots
-        self.buf = array("d", [0.0]) * (capacity * n_slots)
-        self.base = -n_slots  # first next_iter() yields row 0
-        self.rows = 0
+    def __init__(self, nrows: int, nslots: int) -> None:
+        self.stride = nslots
+        self.buf = array("d", [0.0]) * (nrows * nslots)
+        self.base = -nslots  # first next_iter() yields row 0
+        self.rows_written = 0
         self.active = True
 
-    def next_iter(self) -> int:
+    def next_row(self) -> int:
         """Advance to the next row. Returns the row base index, or -1 when full."""
         if not self.active:
             return -1
@@ -191,26 +190,26 @@ class Recorder:
             self.active = False
             return -1
         self.base = base
-        self.rows += 1
+        self.rows_written += 1
         return base
 
 
 class GpuTimerPool:
     """Pool of GL_TIME_ELAPSED query objects for one GL context/thread.
 
-    ``begin()``/``end()`` bracket a GL block (e.g. ctx.render()). Results are
-    harvested non-blockingly by ``collect()`` - call once per iteration on the
-    owning thread - and written into the recorder row they belong to; results
-    typically arrive one or more iterations after the block was issued.
-    ``drain_blocking()`` is for teardown only, while the owning GL context is
-    still current. If the context does not support timer queries (GL < 3.3)
-    the pool disables itself and all calls become no-ops.
+    `begin()`/`end()` bracket a GL block (e.g. ctx.render()). Results are
+    harvested non-blockingly by calling `collect()` once per iteration on the
+    owning thread, and written into the buffer row they belong to. Results can
+    arrive one or more iterations after the block was issued.
+    For teardown, call `drain_blocking()` while the owning GL context is still
+    current. If the context does not support timer queries (GL < 3.3), the pool
+    disables itself and all calls become no-ops.
     """
 
-    POOL_SIZE = 8
+    POOL_SIZE = 16
 
-    def __init__(self, recorder: Recorder, slot: int) -> None:
-        self._rec = recorder
+    def __init__(self, buffer: Buffer, slot: int) -> None:
+        self._rec = buffer
         self._slot = slot
         self._free: list[int] = []
         self._pending: deque[tuple[int, int]] = deque()  # (row_base, query id)
@@ -308,8 +307,8 @@ class Profiler:
     the recordings into a single sorted timeline at retrieval time."""
 
     def __init__(self, capacity: int = 10_000, wake_factor: int = 8) -> None:
-        self.worker = Recorder(capacity, Worker_Timestamp_Indices.COUNT)
-        self.main = Recorder(capacity, Render_Timestamp_Indices.COUNT)
+        self.worker = Buffer(capacity, Worker_Timestamp_Indices.COUNT)
+        self.main = Buffer(capacity, Render_Timestamp_Indices.COUNT)
         self.worker_gpu = GpuTimerPool(self.worker, Worker_Timestamp_Indices.GPU_RENDER)
         self.main_gpu = GpuTimerPool(self.main, Render_Timestamp_Indices.GPU_BLIT)
         # Appended by mpv's update callback thread, drained by the worker.
@@ -340,10 +339,10 @@ class Profiler:
         buf[base + Worker_Timestamp_Indices.WAKE_COUNT] = float(count)
 
     @staticmethod
-    def _first_ts(rec: Recorder, slots: tuple[int, ...]) -> float:
+    def _first_ts(rec: Buffer, slots: tuple[int, ...]) -> float:
         """First nonzero timestamp in the recorder (rows are chronological)."""
         buf = rec.buf
-        lim = rec.rows * rec.stride
+        lim = rec.rows_written * rec.stride
         for base in range(0, lim, rec.stride):
             for s in slots:
                 v = buf[base + s]
@@ -367,7 +366,7 @@ class Profiler:
     def _emit_rows(
         events: list[tuple[float, str, str, float]],
         t0: float,
-        rec: Recorder,
+        rec: Buffer,
         thread: str,
         gpu_thread: str,
         gpu_name: str,
@@ -383,7 +382,7 @@ class Profiler:
     ) -> None:
         buf = rec.buf
         stride = rec.stride
-        for r in range(rec.rows):
+        for r in range(rec.rows_written):
             b = r * stride
             for name, s0, s1 in spans:
                 a = buf[b + s0]
@@ -449,7 +448,7 @@ class Profiler:
         wake_t = self.wake_log_t
         wake_f = self.wake_log_trigger
         wake_n = self.wake_log_len
-        for r in range(self.worker.rows):
+        for r in range(self.worker.rows_written):
             b = r * stride
             count = int(buf[b + Worker_Timestamp_Indices.WAKE_COUNT])
             if count <= 0:

@@ -705,7 +705,7 @@ class MpvMoviestim:
                 profiler_gpu.collect()
 
             if profiling_enabled:
-                base = profiler_cpu.next_iter()
+                base = profiler_cpu.next_row()
                 # disable further profiling data collection if buffer is full
                 if base < 0:
                     profiling_enabled = False
@@ -1076,7 +1076,7 @@ class MpvMoviestim:
             # GPU-side timestamps need to be collected
             profiler_gpu.collect()  # harvest GPU results from previous iterations
             done_fence = None
-            base = profiler_cpu.next_iter()
+            base = profiler_cpu.next_row()
             # disable timestamp collection if profiler buffer is full
             if base < 0:
                 profiling_enabled = False
