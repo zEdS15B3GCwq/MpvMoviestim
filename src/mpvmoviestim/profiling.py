@@ -43,21 +43,12 @@ from __future__ import annotations
 
 import csv
 from array import array
-from collections import deque
 from typing import TYPE_CHECKING
 
 from pyglet import gl
 
 if TYPE_CHECKING:
     from pathlib import Path
-
-__all__ = [
-    "GpuTimerPool",
-    "Profiler",
-    "Render_Timestamp_Indices",
-    "ThreadRecorder",
-    "Worker_Timestamp_Indices",
-]
 
 
 class Worker_Timestamp_Indices:
@@ -75,9 +66,11 @@ class Worker_Timestamp_Indices:
     FENCE_POST_T: int
     FLIP_REQUEST_T: int
     SET_DONE_T: int
-    WAIT_DONE_DUR: int
+    WAIT_DONE_T0: int
+    WAIT_DONE_T1: int
+    WAIT_DONE_STATE: int
     ITER_DONE_T: int
-    GPU_RENDER: int
+    GPU_RENDER_DUR: int
 
     __slots__ = (  # noqa: RUF023
         "UPDATE_T0",  # ctx.update() span
@@ -93,9 +86,11 @@ class Worker_Timestamp_Indices:
         "FENCE_POST_T",  # render fence posted (instant)
         "FLIP_REQUEST_T",  # request to flip buffer indices (instant)
         "SET_DONE_T",  # worker_render_done.set() (instant)
-        "WAIT_DONE_DUR",  # blocking clientWaitSync duration on private done-fence (-1: timeout)
+        "WAIT_DONE_T0",  # blocking clientWaitSync start on private done-fence
+        "WAIT_DONE_T1",
+        "WAIT_DONE_STATE",  # 1=already done, 2=not ready, 3=failed
         "ITER_DONE_T",  # ~when the GPU finished this iteration's render (instant)
-        "GPU_RENDER",  # GL_TIME_ELAPSED duration of ctx.render() (seconds, filled late)
+        "GPU_RENDER_DUR",  # GL_TIME_ELAPSED duration of ctx.render() (seconds, filled late)
     )
 
     def __init__(self):
@@ -117,9 +112,11 @@ class Render_Timestamp_Indices:
     BLIT_T0: int
     BLIT_T1: int
     FENCE_POST_T: int
-    WAIT_DONE_DUR: int
+    WAIT_DONE_T0: int
+    WAIT_DONE_T1: int
+    WAIT_DONE_STATE: int
     DRAW_EXIT_T: int
-    GPU_BLIT: int
+    GPU_BLIT_DUR: int
 
     __slots__ = (  # noqa: RUF023
         "DRAW_ENTRY_T",  # draw() entered (instant)
@@ -134,9 +131,11 @@ class Render_Timestamp_Indices:
         "BLIT_T0",  # blit span (CPU-side command issue time)
         "BLIT_T1",
         "FENCE_POST_T",  # blit fence posted (instant)
-        "WAIT_DONE_DUR",  # blocking clientWaitSync duration on private done-fence (-1: timeout)
+        "WAIT_DONE_T0",  # blocking clientWaitSync start on private done-fence
+        "WAIT_DONE_T1",
+        "WAIT_DONE_STATE",  # 1=already done, 2=not ready, 3=failed
         "DRAW_EXIT_T",  # ~when the GPU finished this iteration's blit (instant)
-        "GPU_BLIT",  # GL_TIME_ELAPSED duration of the blit (seconds, filled late)
+        "GPU_BLIT_DUR",  # GL_TIME_ELAPSED duration of the blit (seconds, filled late)
     )
 
     def __init__(self):
@@ -194,149 +193,80 @@ class Buffer:
         return base
 
 
-class GpuTimerPool:
-    """Pool of GL_TIME_ELAPSED query objects for one GL context/thread.
+class GpuTimer:
+    """Helper class to measure elapsed time on GPU in an OpenGL block.
 
-    `begin()`/`end()` bracket a GL block (e.g. ctx.render()). Results are
-    harvested non-blockingly by calling `collect()` once per iteration on the
-    owning thread, and written into the buffer row they belong to. Results can
-    arrive one or more iterations after the block was issued.
-    For teardown, call `drain_blocking()` while the owning GL context is still
-    current. If the context does not support timer queries (GL < 3.3), the pool
-    disables itself and all calls become no-ops.
+    Uses GL_TIME_ELAPSED timer queries for a block of GL commands. Use
+    `begin()`/`end()` to bracket a GL block (e.g. ctx.render()), then
+    `collect()` to retrieve the result in a blocking way.
+
+    The intended safe way is to use it together with a sync fence added
+    after the block that is CPU-waited on. Waiting on the fence ensures
+    that the query result is immediately available so `collect()` doesn't
+    incur additional CPU wait.
+
+    One query ID is created on class instantiation and reused for in
+    subsequent queries. Always call `end()` and `collect()` after each
+    `begin()`, otherwise reusing the same query ID will result in
+    undefined behavior.
     """
 
-    POOL_SIZE = 16
-
-    def __init__(self, buffer: Buffer, slot: int) -> None:
-        self._rec = buffer
-        self._slot = slot
-        self._free: list[int] = []
-        self._pending: deque[tuple[int, int]] = deque()  # (row_base, query id)
-        self._total = 0
-        self._cur: int | None = None
-        self._ok: bool | None = None  # None = not probed yet
-
-    def _probe(self) -> bool:
-        """Check GL version once; GL_TIME_ELAPSED is core in 3.3+."""
-        try:
-            major = (gl.GLint * 1)()
-            minor = (gl.GLint * 1)()
-            gl.glGetIntegerv(gl.GL_MAJOR_VERSION, major)
-            gl.glGetIntegerv(gl.GL_MINOR_VERSION, minor)
-            self._ok = (major[0], minor[0]) >= (3, 3)
-        except Exception:  # pylint: disable=broad-exception-caught  # any GL/pyglet failure -> disable
-            self._ok = False
-        return self._ok
+    def __init__(self) -> None:
+        self._id = (gl.GLuint * 1)()
+        gl.glGenQueries(1, self._id)
 
     def begin(self) -> None:
-        """Start a GPU time measurement. No-op if unsupported."""
-        if self._ok is None and not self._probe():
-            return
-        if not self._ok:
-            return
-        if self._free:
-            q = self._free.pop()
-        elif self._total < self.POOL_SIZE:
-            ids = (gl.GLuint * 1)()
-            gl.glGenQueries(1, ids)
-            q = ids[0]
-            self._total += 1
-        else:
-            # Pool exhausted: block on the oldest pending query (should be rare).
-            base, q = self._pending.popleft()
-            self._store_blocking(base, q)
-        gl.glBeginQuery(gl.GL_TIME_ELAPSED, q)
-        self._cur = q
+        """Start a GPU time measurement."""
+        gl.glBeginQuery(gl.GL_TIME_ELAPSED, self._id)
 
-    def end(self, base: int) -> None:
-        """Stop the measurement; the result is queued for ``base``'s row."""
-        q = self._cur
-        if q is None:
-            return
-        self._cur = None
+    def end(self) -> None:
+        """Indicate the end of the measured GPU block."""
         gl.glEndQuery(gl.GL_TIME_ELAPSED)
-        self._pending.append((base, q))
 
-    def collect(self) -> None:
-        """Harvest available results non-blockingly (owning thread, per iteration)."""
-        pend = self._pending
-        if not pend:
-            return
-        avail = (gl.GLuint * 1)()
+    def collect(self) -> int:
+        """Retrieve the measured elapsed time in nanoseconds."""
         val = (gl.GLuint64 * 1)()
-        buf = self._rec.buf
-        slot = self._slot
-        while pend:
-            base, q = pend[0]
-            gl.glGetQueryObjectuiv(q, gl.GL_QUERY_RESULT_AVAILABLE, avail)
-            if not avail[0]:
-                break  # queries complete in order
-            gl.glGetQueryObjectui64v(q, gl.GL_QUERY_RESULT, val)
-            buf[base + slot] = val[0] * 1e-9
-            pend.popleft()
-            self._free.append(q)
+        gl.glGetQueryObjectui64v(self._id, gl.GL_QUERY_RESULT, val)
+        return val[0]
 
-    def _store_blocking(self, base: int, q: int) -> None:
-        val = (gl.GLuint64 * 1)()
-        gl.glGetQueryObjectui64v(q, gl.GL_QUERY_RESULT, val)  # blocks until ready
-        self._rec.buf[base + self._slot] = val[0] * 1e-9
-        self._free.append(q)
-
-    def drain_blocking(self) -> None:
-        """Blocking drain + delete all queries. Teardown only; the owning GL
-        context must be current on the calling thread."""
-        if self._ok is not True:
-            return
-        if self._cur is not None:
-            gl.glEndQuery(gl.GL_TIME_ELAPSED)
-            q, self._cur = self._cur, None
-            self._pending.append((self._rec.base, q))
-        while self._pending:
-            base, q = self._pending.popleft()
-            self._store_blocking(base, q)
-        if self._free:
-            ids = (gl.GLuint * len(self._free))(*self._free)
-            gl.glDeleteQueries(len(self._free), ids)
-        self._free.clear()
-        self._total = 0
+    def __del__(self) -> None:
+        if hasattr(self, "_id"):
+            gl.glDeleteQueries(1, self._id)
 
 
 class Profiler:
-    """Owns both thread recorders, GPU timer pools and the wake log; merges
-    the recordings into a single sorted timeline at retrieval time."""
+    """Main profiling class that manages the worker and main thread recorders,
+    GPU timers, and the wake log.
+
+    Reserves profiling buffers for `capacity` iterations, instantiates GPU timers,
+    and pre-allocates an update_callback log of `capacity * wake_factor` entries.
+    """
+
+    worker_indices: Worker_Timestamp_Indices
+    main_indices: Render_Timestamp_Indices
+    update_indices: Update_Callback_Indices
+    worker: Buffer
+    main: Buffer
+    update_cb: Buffer
+    worker_gpu: GpuTimer
+    main_gpu: GpuTimer
 
     def __init__(self, capacity: int = 10_000, wake_factor: int = 8) -> None:
-        self.worker = Buffer(capacity, Worker_Timestamp_Indices.COUNT)
-        self.main = Buffer(capacity, Render_Timestamp_Indices.COUNT)
-        self.worker_gpu = GpuTimerPool(self.worker, Worker_Timestamp_Indices.GPU_RENDER)
-        self.main_gpu = GpuTimerPool(self.main, Render_Timestamp_Indices.GPU_BLIT)
-        # Appended by mpv's update callback thread, drained by the worker.
-        self.wake_times: deque[tuple[float, bool]] = deque()
-        # Preallocated wake log: parallel arrays of stamps and trigger flags.
-        self.wake_log_t = array("d", [0.0]) * (capacity * wake_factor)
-        self.wake_log_trigger = array("b", [0]) * (capacity * wake_factor)
-        self.wake_log_len = 0
+        # allocate CPU profiling buffers for worker and main threads
+        self.worker_indices = Worker_Timestamp_Indices()
+        self.main_indices = Render_Timestamp_Indices()
+        self.worker = Buffer(capacity, len(self.worker_indices.__slots__))
+        self.main = Buffer(capacity, len(self.main_indices.__slots__))
 
-    def drain_wakes(self, buf: array, base: int) -> None:
-        """Move all queued callback wake stamps into the wake log (worker thread)."""
-        dq = self.wake_times
-        log_t = self.wake_log_t
-        log_f = self.wake_log_trigger
-        i = self.wake_log_len
-        cap = len(log_t)
-        start = i
-        count = 0
-        while dq:
-            t, trig = dq.popleft()
-            count += 1
-            if i < cap:
-                log_t[i] = t
-                log_f[i] = 1 if trig else 0
-                i += 1
-        self.wake_log_len = i
-        buf[base + Worker_Timestamp_Indices.WAKE_IDX] = float(start) if count else -1.0
-        buf[base + Worker_Timestamp_Indices.WAKE_COUNT] = float(count)
+        # allocate GPU profiling timers for worker and main threads
+        self.worker_gpu = GpuTimer()
+        self.main_gpu = GpuTimer()
+
+        # allocate one more buffer for update callback times
+        self.update_indices = Update_Callback_Indices()
+        self.update_cb = Buffer(
+            capacity * wake_factor, len(self.update_indices.__slots__)
+        )
 
     @staticmethod
     def _first_ts(rec: Buffer, slots: tuple[int, ...]) -> float:
@@ -437,7 +367,7 @@ class Profiler:
             Worker_Timestamp_Indices.WAITSYNC_BLIT_STATE,
             Worker_Timestamp_Indices.WAITSYNC_BLIT_T0,
             "waitsync_blit_poll",
-            Worker_Timestamp_Indices.GPU_RENDER,
+            Worker_Timestamp_Indices.GPU_RENDER_DUR,
             Worker_Timestamp_Indices.RENDER_T0,
             Worker_Timestamp_Indices.WAIT_DONE_DUR,
             Worker_Timestamp_Indices.ITER_DONE_T,
@@ -475,7 +405,7 @@ class Profiler:
             Render_Timestamp_Indices.WAITSYNC_RENDER_STATE,
             Render_Timestamp_Indices.WAITSYNC_RENDER_T0,
             "waitsync_render_poll",
-            Render_Timestamp_Indices.GPU_BLIT,
+            Render_Timestamp_Indices.GPU_BLIT_DUR,
             Render_Timestamp_Indices.BLIT_T0,
             Render_Timestamp_Indices.WAIT_DONE_DUR,
             Render_Timestamp_Indices.DRAW_EXIT_T,

@@ -154,7 +154,7 @@ class TestGetEvents:
         prof.worker.next_row()
         wb[Worker_Timestamp_Indices.RENDER_T0] = 5000.0
         wb[Worker_Timestamp_Indices.RENDER_T1] = 5000.001
-        wb[Worker_Timestamp_Indices.GPU_RENDER] = (
+        wb[Worker_Timestamp_Indices.GPU_RENDER_DUR] = (
             0.002  # duration, small - must not become t0
         )
         wb[Worker_Timestamp_Indices.WAITSYNC_BLIT_STATE] = (

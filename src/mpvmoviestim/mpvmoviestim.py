@@ -72,7 +72,7 @@ from psychopy.tools.monitorunittools import convertToPix
 from pyglet import gl
 
 from . import pixel_format, utils
-from .profiling import Profiler, Render_Timestamp_Indices, Worker_Timestamp_Indices
+from .profiling import Profiler
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -624,15 +624,18 @@ class MpvMoviestim:
         update_cb, and should be called from the render thread.
         """
         ts = self._threading_state
+        trigger_is_set = ts.render_trigger.is_set()
         if ts.profiler is not None:
-            # (timestamp, is_trigger): is_trigger marks the callback that
-            # transitioned render_trigger from unset to set, i.e. the one that
-            # actually woke the worker (best effort, subject to check/set race).
-            ts.profiler.wake_times.append(
-                (perf_counter(), not ts.render_trigger.is_set())
-            )
-            # TODO: pre-allocate wake times, integrate afterwards
-        ts.render_trigger.set()
+            base = ts.profiler.update_cb.next_row()
+            if base > 0:
+                ts.profiler.update_cb.buf[
+                    base + ts.profiler.update_indices.UPDATE_T
+                ] = perf_counter()
+                ts.profiler.update_cb.buf[
+                    base + ts.profiler.update_indices.IS_TRIGGER
+                ] = not trigger_is_set
+        if not trigger_is_set:
+            ts.render_trigger.set()
 
     def _render_worker(self) -> None:
         """Worker thread: render new frames into intermediate buffers
@@ -651,12 +654,12 @@ class MpvMoviestim:
         """
         ts = self._threading_state
         profiling_enabled = ts.profiler is not None
-        profiler_gpu = ts.profiler.worker_gpu if ts.profiler is not None else None
         if profiling_enabled:
             assert ts.profiler is not None
-            profiler_cpu = ts.profiler.worker
-            cpu_record = profiler_cpu.buf
-            indices = Worker_Timestamp_Indices()
+            cpu_profiler = ts.profiler.worker
+            gpu_timer = ts.profiler.worker_gpu
+            cpu_record = cpu_profiler.buf
+            indices = ts.profiler.worker_indices
             done_fence = None
 
         # --- one-time init on this thread ---
@@ -700,19 +703,15 @@ class MpvMoviestim:
             ts.render_trigger.wait()  # wait until the update callback is called
             ts.render_trigger.clear()
 
-            # harvest GPU results from previous iterations (do even after profiler full)
-            if profiler_gpu is not None:
-                profiler_gpu.collect()
-
             if profiling_enabled:
-                base = profiler_cpu.next_row()
+                base = cpu_profiler.next_row()
                 # disable further profiling data collection if buffer is full
                 if base < 0:
                     profiling_enabled = False
                 else:
                     cpu_record[base + indices.UPDATE_T0] = perf_counter()
 
-            # drain pending MPV updates
+            # drain pending MPV updates, check whether there's a new vframe ready
             update_result = self._mpv_render_ctx.update()
             if profiling_enabled:
                 cpu_record[base + indices.UPDATE_T1] = perf_counter()
@@ -769,14 +768,14 @@ class MpvMoviestim:
 
             if profiling_enabled:
                 cpu_record[base + indices.RENDER_T0] = perf_counter()
-                profiler_gpu.begin()
+                gpu_timer.begin()
             self._mpv_render_ctx.render(
                 opengl_fbo=fbo_info,
                 flip_y=True,
                 block_for_target_time=False,
             )
             if profiling_enabled:
-                profiler_gpu.end(base)
+                gpu_timer.end()
                 cpu_record[base + indices.RENDER_T1] = perf_counter()
 
             # Post a fence so the main thread can wait for this render to finish
@@ -794,8 +793,9 @@ class MpvMoviestim:
                 # owned exclusively by the worker so there is no race with the
                 # main thread's glDeleteSync on the shared fence.
                 done_fence = gl.glFenceSync(gl.GL_SYNC_GPU_COMMANDS_COMPLETE, 0)
+                gl.glFlush()
 
-            # Hand off: clear rendering flag, signal buffer flip required
+            # Hand-off: clear rendering flag, signal buffer flip required
             with ts.buffer_fbo_lock:
                 ts.worker_is_rendering = False
                 ts.buffer_flip_required = True
@@ -811,23 +811,25 @@ class MpvMoviestim:
                 # main thread is never delayed by this profiling-only wait.
                 # This wait may have side effects as it can delay the next iteration.
                 assert done_fence is not None
-                tw0 = perf_counter()
+                cpu_record[base + indices.WAIT_DONE_T0] = perf_counter()
                 st = gl.glClientWaitSync(
                     done_fence, gl.GL_SYNC_FLUSH_COMMANDS_BIT, 1_000_000_000
                 )
                 gl.glDeleteSync(done_fence)
-                tw1 = perf_counter()
-                cpu_record[base + indices.WAIT_DONE_DUR] = (
-                    tw1 - tw0
+                cpu_record[base + indices.WAIT_DONE_T1] = perf_counter()
+                cpu_record[base + indices.WAIT_DONE_STATE] = (
+                    1.0
                     if st in (gl.GL_ALREADY_SIGNALED, gl.GL_CONDITION_SATISFIED)
-                    else -1.0
+                    else 2.0
+                    if st == gl.GL_TIMEOUT_EXPIRED
+                    else 3.0
                 )
-                cpu_record[base + indices.ITER_DONE_T] = tw1
+                # blocking collect of GPU timing data, should not cause wait after fence
+                gpu_timer.collect()
+
+                cpu_record[base + indices.ITER_DONE_T] = perf_counter()
 
         # --- cleanup (shadow context still current on this thread) ---
-        if profiler_gpu is not None:
-            # blocking drain so the final iterations' GPU durations are recorded
-            profiler_gpu.drain_blocking()
         self._mpv_render_ctx.free()
         if ts.intermediate_fbo_textures is not None:
             for tex in ts.intermediate_fbo_textures:
