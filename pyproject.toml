@@ -17,6 +17,9 @@ dependencies = [
 requires = ["uv_build>=0.11.8,<0.12.0"]
 build-backend = "uv_build"
 
+[tool.mypy]
+python_version = "3.10"
+
 [[tool.mypy.overrides]]
 module = ["pyglet.*", "psychopy.*"]
 follow_untyped_imports = true
@@ -27,6 +30,10 @@ ignore_missing_imports = true
 
 [tool.pyright]
 pythonVersion = "3.10"
+
+[tool.pyrefly]
+python-version = "3.10"
+preset = "strict"
 
 [dependency-groups]
 dev = [
