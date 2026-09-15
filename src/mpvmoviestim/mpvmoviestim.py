@@ -69,6 +69,7 @@ from time import perf_counter
 from types import ModuleType
 from typing import TYPE_CHECKING, ParamSpec, TypeVar, cast
 
+import pyglet
 from psychopy import logging, visual
 from psychopy.tools.monitorunittools import convertToPix
 from pyglet import gl
@@ -102,6 +103,11 @@ _EMPTY_TIMES = array("d")
 
 
 __all__ = ["MpvMoviestim", "MpvMoviestimState"]
+
+# pyglet calls glGetError() after every GL call, and raises an exception
+# when an error is encountered, which is very slow. Disable this for performance
+# here, or run with "python -O".
+pyglet.options["debug_gl"] = False  # disable pyglet's GL error checking
 
 P = ParamSpec("P")
 R = TypeVar("R")
@@ -747,8 +753,7 @@ class MpvMoviestim:
 
             # The GPU may be still executing the main thread's blit from this FBO,
             # so we do a GPU-side wait before we overwrite it.
-            blit_fence = ts.blit_fences[target_idx]
-            if blit_fence is not None:
+            if (blit_fence := ts.blit_fences[target_idx]) is not None:
                 if profiling_enabled:
                     cpu_record[base + indices.WAITSYNC_BLIT_T0] = perf_counter()
                     # zero-timeout poll: was the main thread's blit already done?
@@ -1085,6 +1090,14 @@ class MpvMoviestim:
         if profiling_enabled:
             cpu_record[base + indices.DRAW_ENTRY_T] = perf_counter()
 
+        if ts.intermediate_fbo_infos is None:
+            logging.error("draw() called but intermediate FBOs are not initialized.")
+            return
+
+        if self._draw_rect is None:
+            logging.error("draw() called but draw rectangle is undefined.")
+            return
+
         # Read the index of the most recently completed worker frame.
         if profiling_enabled:
             cpu_record[base + indices.LOCK_T0] = perf_counter()
@@ -1120,14 +1133,6 @@ class MpvMoviestim:
 
         if present_idx == -1:
             logging.error("draw() called but no frame has been rendered yet.")
-            return
-
-        if ts.intermediate_fbo_infos is None:
-            logging.error("draw() called but intermediate FBOs are not initialized.")
-            return
-
-        if self._draw_rect is None:
-            logging.error("draw() called but draw rectangle is undefined.")
             return
 
         fbo_info = ts.intermediate_fbo_infos[present_idx]
