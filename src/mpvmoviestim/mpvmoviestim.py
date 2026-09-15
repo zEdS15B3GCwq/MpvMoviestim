@@ -1,3 +1,5 @@
+# pyrefly: ignore-errors[unbound-name]
+
 # threaded, uses intermediate FBO
 # target: display-vdrop when report_swap used, otherwise audio sync
 
@@ -844,7 +846,7 @@ class MpvMoviestim:
         logging.exp(f"MPV({prefix}): {text}")
 
     @_log_pre_post
-    def _on_eof(self, prop_name, value) -> None:
+    def _on_eof(self, prop_name: str, value: bool | None) -> None:
         # value -> None at init
         # value -> False when playback starts
         # value -> True at EOF
@@ -857,9 +859,9 @@ class MpvMoviestim:
             logging.exp("EOF reached")
             self._state = MpvMoviestimState.EOF_REACHED
 
-    def _on_drop(self, prop_name, value) -> None:
+    def _on_drop(self, prop_name: str, value: bool | None) -> None:
         print(f"Frame dropped. Property {prop_name} changed to {value}")
-        # TODO
+        # TODO maybe no need
 
     # def _on_event(self, event) -> None:
     #     if event == mpv.MpvEventID.SHUTDOWN:
@@ -1070,15 +1072,12 @@ class MpvMoviestim:
         profiling_enabled = self._profiler is not None
         if profiling_enabled:
             assert self._profiler is not None
-            profiler_cpu = self._profiler.main
-            profiler_gpu = self._profiler.main_gpu
-            cpu_record = profiler_cpu.buf
-            indices = Render_Timestamp_Indices()
-
-            # GPU-side timestamps need to be collected
-            profiler_gpu.collect()  # harvest GPU results from previous iterations
+            cpu_profiler = self._profiler.main
+            gpu_timer = self._profiler.main_gpu
+            cpu_record = cpu_profiler.buf
+            indices = self._profiler.main_indices
             done_fence = None
-            base = profiler_cpu.next_row()
+            base = cpu_profiler.next_row()
             # disable timestamp collection if profiler buffer is full
             if base < 0:
                 profiling_enabled = False
@@ -1166,7 +1165,7 @@ class MpvMoviestim:
         # Blit intermediate FBO → PsychoPy's target FBO.
         if profiling_enabled:
             cpu_record[base + indices.BLIT_T0] = perf_counter()
-            profiler_gpu.begin()
+            gpu_timer.begin()
         utils.blit_with_draw_rect(
             self._draw_rect,
             fbo_info["fbo"],
@@ -1175,7 +1174,7 @@ class MpvMoviestim:
             self.flip_vertical,
         )
         if profiling_enabled:
-            profiler_gpu.end(base)
+            gpu_timer.end(base)
             cpu_record[base + indices.BLIT_T1] = perf_counter()
 
         # Post a blit fence so the worker knows it's safe to write to this FBO
