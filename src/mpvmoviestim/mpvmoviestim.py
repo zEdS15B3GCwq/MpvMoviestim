@@ -1106,7 +1106,12 @@ class MpvMoviestim:
             logging.error("draw() called but draw rectangle is undefined.")
             return
 
+        if self._nvtx_lib is not None:
+            self._nvtx_lib.rangePush("main - draw", color=0x00FF00)
+
         # Read the index of the most recently completed worker frame.
+        if self._nvtx_lib is not None:
+            self._nvtx_lib.rangePush("main - waitlock", color=0x0000FF)
         if profiling_enabled:
             cpu_record[base + indices.LOCK_T0] = perf_counter()
         with ts.buffer_fbo_lock:
@@ -1120,8 +1125,12 @@ class MpvMoviestim:
                 ts.buffer_flip_required = False
         if profiling_enabled:
             cpu_record[base + indices.LOCK_T1] = perf_counter()
+        if self._nvtx_lib is not None:
+            self._nvtx_lib.rangePop()
 
         # if worker is mid-render: CPU-wait so we get the newest frame this cycle
+        if self._nvtx_lib is not None:
+            self._nvtx_lib.rangePush("main - waitworker", color=0x000080)
         if worker_is_rendering:
             if profiling_enabled:
                 cpu_record[base + indices.CPU_WAIT_T0] = perf_counter()
@@ -1136,6 +1145,8 @@ class MpvMoviestim:
                         1 - ts.worker_fbo_idx,
                     )
                     ts.buffer_flip_required = False
+        if self._nvtx_lib is not None:
+            self._nvtx_lib.rangePop()
 
         present_idx = ts.present_fbo_idx  # only main writes this; safe outside lock
 
@@ -1148,6 +1159,8 @@ class MpvMoviestim:
         # GPU-side wait: stall the GPU command queue (not the CPU) until the
         # worker's render into this FBO is complete.
         if (render_fence := ts.render_fences[present_idx]) is not None:
+            if self._nvtx_lib is not None:
+                self._nvtx_lib.rangePush("main - waitfence", color=0x008080)
             if profiling_enabled:
                 cpu_record[base + indices.WAITSYNC_RENDER_T0] = perf_counter()
                 # zero-timeout poll: was the worker's render already done?
@@ -1167,6 +1180,8 @@ class MpvMoviestim:
             ts.render_fences[present_idx] = None
             if profiling_enabled:
                 cpu_record[base + indices.WAITSYNC_RENDER_T1] = perf_counter()
+            if self._nvtx_lib is not None:
+                self._nvtx_lib.rangePop()
 
         # Snapshot NEXT_FRAME_INFO while we have a frame available.
         # TODO: move this to worker
@@ -1179,6 +1194,8 @@ class MpvMoviestim:
         if profiling_enabled:
             cpu_record[base + indices.BLIT_T0] = perf_counter()
             gpu_timer.begin()
+        if self._nvtx_lib is not None:
+            self._nvtx_lib.rangePush("main - blit", color=0xFF0000)
         utils.blit_with_draw_rect(
             self._draw_rect,
             fbo_info["fbo"],
@@ -1187,7 +1204,7 @@ class MpvMoviestim:
             self.flip_vertical,
         )
         if profiling_enabled:
-            gpu_timer.end(base)
+            gpu_timer.end()
             cpu_record[base + indices.BLIT_T1] = perf_counter()
 
         # Post a blit fence so the worker knows it's safe to write to this FBO
