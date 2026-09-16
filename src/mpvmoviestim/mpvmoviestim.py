@@ -75,7 +75,6 @@ from psychopy.tools.monitorunittools import convertToPix
 from pyglet import gl
 
 from . import pixel_format, utils
-from .profiling import Profiler
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -83,6 +82,8 @@ if TYPE_CHECKING:
 
     import mpv
     from pyglet.window import BaseWindow
+
+    from .profiling import Profiler
 
 TIMEOUT_DEFAULT_S = 5.0
 
@@ -335,6 +336,8 @@ class MpvMoviestim:
     _mpv_render_ctx: mpv.MpvRenderContext
     _target_fbo_info: dict[str, int]  # mpv.MpvOpenGLFBO
     # _report_swap: bool
+    _profiling_lib: ModuleType | None
+    _nvtx_lib: ModuleType | None
 
     def __init__(
         self,
@@ -351,6 +354,7 @@ class MpvMoviestim:
         flipVert: bool = False,
         profiling: bool = False,
         profiling_capacity: int = 10_000,
+        nvtx: bool = False,
         # TODO: advanced_control: bool = True,
         # TODO: verify audio/display-vdrop modes
     ):
@@ -397,10 +401,14 @@ class MpvMoviestim:
 
         # Profiling — must be created before the worker thread starts.
         if profiling:
-            self._profiler = Profiler(capacity=profiling_capacity)
+            self._profiling_lib = importlib.import_module("mpvmoviestim.profiling")
+            self._profiler = self._profiling_lib.Profiler(capacity=profiling_capacity)
             self._threading_state.profiler = self._profiler
         else:
             self._profiler = None
+            self._profiling_lib = None
+
+        self._nvtx_lib = importlib.import_module("nvtx") if nvtx else None
 
         # lazy load MPV
         self._mpv_lib = importlib.import_module("mpv")

@@ -37,5 +37,6 @@ preset = "strict"
 
 [dependency-groups]
 dev = [
+    "nvtx>=0.2.16",
     "pytest>=9.0.3",
 ]
