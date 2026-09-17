@@ -24,21 +24,22 @@ _INTERNAL_FORMAT_MAP: dict[int, str] = {
 }
 
 
-def _infer_backbuffer_format(red: int, green: int, blue: int, alpha: int) -> int:
-    key = (red, green, blue, alpha)
-    if key == (8, 8, 8, 8):
-        return int(getattr(gl, "GL_RGBA8", 0x8058))
-    if key == (8, 8, 8, 0):
-        return int(getattr(gl, "GL_RGB8", 0x8051))
-    if key == (10, 10, 10, 2):
-        return int(getattr(gl, "GL_RGB10_A2", 0x8059))
-    if key == (10, 10, 10, 0):
-        return int(getattr(gl, "GL_RGB10", 0x8052))
-    if key == (16, 16, 16, 16):
-        return int(getattr(gl, "GL_RGBA16", 0x805B))
-    if key == (16, 16, 16, 0):
-        return int(getattr(gl, "GL_RGB16", 0x8054))
-    return 0
+def _infer_backbuffer_format(red: int, green: int, blue: int, alpha: int) -> int:  # noqa: PLR0911
+    match (red, green, blue, alpha):
+        case (8, 8, 8, 8):
+            return int(getattr(gl, "GL_RGBA8", 0x8058))
+        case (8, 8, 8, 0):
+            return int(getattr(gl, "GL_RGB8", 0x8051))
+        case (10, 10, 10, 2):
+            return int(getattr(gl, "GL_RGB10_A2", 0x8059))
+        case (10, 10, 10, 0):
+            return int(getattr(gl, "GL_RGB10", 0x8052))
+        case (16, 16, 16, 16):
+            return int(getattr(gl, "GL_RGBA16", 0x805B))
+        case (16, 16, 16, 0):
+            return int(getattr(gl, "GL_RGB16", 0x8054))
+        case _:
+            return 0
 
 
 def get_internal_format_name(format_id: int) -> str:
@@ -86,8 +87,6 @@ def get_psychopy_fbo_info(
         gl.glGetIntegerv(pname, out)
         return out.value
 
-    target_fbo: int = 0
-
     if win.useFBO:
         tex_id: int = win.frameTexture
 
@@ -115,9 +114,11 @@ def get_psychopy_fbo_info(
         #         "(expected rgba32f)."
         #     )
 
-        target_fbo = win.frameBuffer.value
+        target_fbo: int = win.frameBuffer.value
 
     else:
+        target_fbo = 0
+
         red_bits = _get_gl_int(int(gl.GL_RED_BITS))
         green_bits = _get_gl_int(int(gl.GL_GREEN_BITS))
         blue_bits = _get_gl_int(int(gl.GL_BLUE_BITS))

@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     from typing import Any
 
     from mpv import MpvRenderContext
+    from pyglet.window import BaseWindow
 
 
 _PIXEL_FORMAT_MAP: dict[int, tuple[int, int, str]] = {
@@ -661,7 +662,7 @@ def test_blit_clip_no_resize(
     # gl.glBindFramebuffer(gl.GL_DRAW_FRAMEBUFFER, previous_draw_FBO)
 
 
-def create_shadow_window(main_window: Any) -> Any:
+def create_shadow_window(main_window: BaseWindow) -> BaseWindow:
     """Create an invisible pyglet window that shares *main_window*'s OpenGL context.
 
     Parameters

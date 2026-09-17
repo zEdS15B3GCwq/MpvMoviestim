@@ -51,9 +51,6 @@
 # cannot ever snatch away a buffer that the main thread was just
 # about to render.
 
-# TODO: verify if locks/fences are guaranteed to resolve at some time - need timeout?
-# TODO: import namedtuple, convert dataclass to namedtuple?
-
 from __future__ import annotations
 
 import ctypes
@@ -61,11 +58,9 @@ import dataclasses
 import functools
 import importlib
 import threading
-from array import array
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from enum import Enum, auto
 from pathlib import Path
-from time import perf_counter
 from types import ModuleType
 from typing import TYPE_CHECKING, ParamSpec, TypeVar, cast
 
@@ -83,13 +78,7 @@ if TYPE_CHECKING:
     import mpv
     from pyglet.window import BaseWindow
 
-    from .profiling import Profiler
-
 TIMEOUT_DEFAULT_S = 5.0
-
-# Dummy write target for profiling stamp sites when profiling is disabled;
-# never indexed (guarded by base >= 0, which is always False in that case).
-_EMPTY_TIMES = array("d")
 
 # these are possible performance tweaks
 # "scale": "bilinear",
@@ -196,7 +185,7 @@ _mpv_default_options: dict[str, Any] = {
     "pause": True,  # start paused
     "idle": True,  # do not quit when there is no file to play (needed for rewind?)
     # "wid": 0,  # do not create a new window (implied by other settings)
-    # "keepaspect": False,  # (what does this do?)
+    # "keepaspect": False,
     "video-sync": "display-vdrop",
 }
 # TODO: test if display-vdrop is OK to set here; not setting fps and not calling report_swap
@@ -207,8 +196,7 @@ _mpv_default_audio_options: dict[str, Any] = {
     "volume": 100,  # set volume to 100%
     "volume_gain": 0,  # another way to set loudness
     "audio_device": "auto",  # automatically choose audio output device
-    # "audio-stream-silence": True,  # feeds ao silent audio even when paused
-    # audio-stream-silence usage discouraged by manual
+    # "audio_exclusive": "yes",  # exclusive access to audio device (no other apps can play sound)
 }
 
 
@@ -318,44 +306,50 @@ class MpvMoviestim:
     flip_horizontal: bool
     flip_vertical: bool
     # Media
-    _loaded_movie: Path
+    _loaded_movie: Path | None
     _autostart: bool
     _media_size: tuple[int, int] | None
-    _draw_rect: tuple[int, int, int, int] | None  # display rect (x, y, w, h)
-    # Player core
+    _draw_rect: tuple[int, int, int, int] | None  # display rect pix (x, y, w, h)
+    # Core
     _state: MpvMoviestimState
-    _threading_state: ThreadingState
+    _threading_state: ThreadingState | None
+    _double_buffering: bool
     # MPV and OpenGL
     _mpv_lib: ModuleType
     _player: mpv.MPV
     _mpv_options: dict[str, Any]
-    # TODO: _advanced_control: bool
     _c_getproc: ctypes._CFunctionType
     _mpv_render_ctx: mpv.MpvRenderContext
     _target_fbo_info: dict[str, int]  # mpv.MpvOpenGLFBO
-    # _report_swap: bool
+    # TODO: _advanced_control: bool
 
-    def __init__(
+    def __init__(  # noqa: PLR0913
         self,
         window: visual.Window,
-        file: Path | str,
-        autoStart: bool = False,
-        noAudio: bool = False,
+        file: Path | str | None,
+        *,
+        autostart: bool = False,
+        no_audio: bool = False,
         volume: float = 1.0,
-        monitor_framerate: float | None = None,
-        mpv_options: dict[str, Any] | None = None,
         pos: tuple[int | float, int | float] = (0, 0),
         size: tuple[int | float, int | float] | None = None,
-        flipHoriz: bool = False,
-        flipVert: bool = False,
+        flip_horiz: bool = False,
+        flip_vert: bool = False,
+        monitor_framerate: float | None = None,
+        mpv_options: dict[str, Any] | None = None,
+        double_buffering: bool = True,
         # TODO: advanced_control: bool = True,
         # TODO: verify audio/display-vdrop modes
     ):
+        # **************
+        # Configure MPV
+        # **************
+        # start from default options
         self._mpv_options = _mpv_default_options.copy()
         # add log handler
         self._mpv_options.update({"log_handler": self._mpv_log_fn, "loglevel": "info"})
         # add audio options
-        if noAudio:
+        if no_audio:
             self._mpv_options["ao"] = "null"
         else:
             self._mpv_options.update(_mpv_default_audio_options)
@@ -374,94 +368,116 @@ class MpvMoviestim:
         if mpv_options is not None:
             self._mpv_options.update(mpv_options)
 
+        # **************
+        # Psychopy and display-related configuration
+        # **************
         self._window = window
         self._size = size
         self._position = pos
-        self._autostart = autoStart
-        self.flip_horizontal = flipHoriz
-        self.flip_vertical = flipVert
+        self._autostart = autostart
+        self.flip_horizontal = flip_horiz
+        self.flip_vertical = flip_vert
+        self._media_size = None
+
+        # **************
+        # Internal state
+        # **************
+
+        # unspecified - not initialized or unknown state
+        self._state = MpvMoviestimState.UNSPECIFIED
+
         # self._advanced_control = advanced_control
 
-        self._state = MpvMoviestimState.UNSPECIFIED
-        self._media_size = None
-        self._draw_rect = self._bounding_rect(size, None, pos, window)
-        logging.info(f"setting draw rect to: {self._draw_rect}")
+        # self._draw_rect = self._bounding_rect(size, None, pos, window)
+        # logging.info(f"setting draw rect to: {self._draw_rect}")
 
         # self._report_swap = False
 
-        # Synchronisation primitives — must exist before worker thread starts.
-        self._threading_state = ThreadingState()
+        # infer FBO information (size, pixel format) for the PsychoPy window
+        self._init_target_fbo()
+        # TODO: if target FBO is set here, what happens if the window is resized?
 
-        # lazy load MPV
-        self._mpv_lib = importlib.import_module("mpv")
-
+        # initialise MPV core
         self._init_mpv_player()
-        self.loadMovie(file)
+
+        self._state = MpvMoviestimState.NO_MEDIA
+
+        # Synchronisation primitives — must exist before worker thread starts.
+        # self._threading_state = ThreadingState()
+
+        # TODO: direct rendering / no buffer when media > screen fps, worker thread only update_cb
+
+        # load movie if specified
+        if file is not None:
+            self.loadMovie(file)
 
     @_log_pre_post
     @_state_guard(allowed_state=MpvMoviestimState.UNSPECIFIED)
     def _init_mpv_player(self) -> None:
+        """Initialise the MPV player core and OpenGL render context."""
+        # lazy load MPV
+        self._mpv_lib = importlib.import_module("mpv")
 
-        # create MPV player instance
-        try:
-            self._player = self._mpv_lib.MPV(**self._mpv_options)
-            self._player.observe_property("eof-reached", self._on_eof)
+        # create MPV player
+        self._player = self._mpv_lib.MPV(**self._mpv_options)
 
-            # Build the GL proc-address resolver (a plain function pointer —
-            # no GL context required yet).
-            self._c_getproc = self._mpv_lib.MpvGlGetProcAddressFn(
-                utils.get_proc_address
+        # set EOF callback
+        self._player.observe_property("eof-reached", self._on_eof)
+
+        # find the OpenGl proc-address resolver
+        self._c_getproc = self._mpv_lib.MpvGlGetProcAddressFn(utils.get_proc_address)
+
+    @_log_pre_post
+    @_state_guard(allowed_state=MpvMoviestimState.UNSPECIFIED)
+    def _init_target_fbo(self) -> None:
+        # infer the target FBO information (size, pixel format) for the PsychoPy window
+        # must happen while the main window's context is current
+        assert self._window.winHandle is not None
+        pyglet_window: BaseWindow = self._window.winHandle
+        pyglet_window.switch_to()
+        pyglet_window.activate()
+        psychopy_fbo_info = pixel_format.get_psychopy_fbo_info(self._window)
+        format_name = (
+            "<undetermined>"
+            if "internal_format" not in psychopy_fbo_info
+            else pixel_format.get_internal_format_name(
+                psychopy_fbo_info["internal_format"]
             )
+        )
+        logging.info(
+            f"Psychopy's rendering FBO: fbo={psychopy_fbo_info['fbo']}, "
+            f"size={psychopy_fbo_info['w']}x{psychopy_fbo_info['h']}, "
+            f"format={format_name}"
+        )
+        self._target_fbo_info = psychopy_fbo_info
 
-            # Determine the best pixel format to render to.
-            # Must happen while the main window's context is current.
-            inferred_fbo_info = pixel_format.get_psychopy_fbo_info(self._window)
-            format_name = (
-                "<undetermined>"
-                if "internal_format" not in inferred_fbo_info
-                else pixel_format.get_internal_format_name(
-                    inferred_fbo_info["internal_format"]
-                )
-            )
-            logging.info(
-                f"Psychopy's rendering FBO: fbo={inferred_fbo_info['fbo']}, "
-                f"size={inferred_fbo_info['w']}x{inferred_fbo_info['h']}, "
-                f"format={format_name}"
-            )
-            self._target_fbo_info = inferred_fbo_info
+    @_log_pre_post
+    @_state_guard(allowed_state=MpvMoviestimState.UNSPECIFIED)
+    def _init_threading(self) -> None:
+        pass
+        # # Create the shadow window (shared context) on the main thread so
+        # # that its DC/surface is set up before the worker uses it.
+        # # Pass winHandle (the underlying pyglet window) so utils.py does not
+        # # depend on PsychoPy.
+        # logging.info("Creating shadow window for context sharing.")
+        # self._threading_state.shadow_window = utils.create_shadow_window(pyglet_window)
 
-            # TODO: direct rendering / no buffer when media > screen fps, worker thread only update_cb
-
-            # Create the shadow window (shared context) on the main thread so
-            # that its DC/surface is set up before the worker uses it.
-            # Pass winHandle (the underlying pyglet window) so utils.py does not
-            # depend on PsychoPy.
-            logging.info("Creating shadow window for context sharing.")
-            self._threading_state.shadow_window = utils.create_shadow_window(
-                self._window.winHandle
-            )
-
-            # Start worker — it takes the shadow context, creates the render
-            # context and the double-buffered intermediate FBOs, then signals
-            # worker_init_done.
-            logging.info("Instantiating and starting renderer worker thread.")
-            self._threading_state.worker_thread = threading.Thread(
-                target=self._render_worker, name="mpv-render-worker", daemon=True
-            )
-            self._threading_state.worker_thread.start()
-            logging.info("Waiting for worker thread to initialise.")
-            if not self._threading_state.worker_init_done.wait(
-                timeout=TIMEOUT_DEFAULT_S
-            ):
-                raise TimeoutError(
-                    "Timed out waiting for render worker thread to initialise."
-                )
-            logging.info("Finished waiting for worker thread.")
-            # set IDLE state, meaning core is active, file not loaded
-            self._state = MpvMoviestimState.NO_MEDIA
-        except Exception as e:
-            logging.error(f"Failed to initialize MPV player: {e}")
-            raise
+        # # Start worker — it takes the shadow context, creates the render
+        # # context and the double-buffered intermediate FBOs, then signals
+        # # worker_init_done.
+        # logging.info("Instantiating and starting renderer worker thread.")
+        # self._threading_state.worker_thread = threading.Thread(
+        #     target=self._render_worker, name="mpv-render-worker", daemon=True
+        # )
+        # self._threading_state.worker_thread.start()
+        # logging.info("Waiting for worker thread to initialise.")
+        # if not self._threading_state.worker_init_done.wait(timeout=TIMEOUT_DEFAULT_S):
+        #     raise TimeoutError(
+        #         "Timed out waiting for render worker thread to initialise."
+        #     )
+        # logging.info("Finished waiting for worker thread.")
+        # # set IDLE state, meaning core is active, file not loaded
+        # self._state = MpvMoviestimState.NO_MEDIA
 
     @staticmethod
     def _bounding_rect(

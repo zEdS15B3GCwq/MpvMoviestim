@@ -86,8 +86,8 @@ def main() -> None:
     player = mpvmoviestim.MpvMoviestim(
         window=win,
         file=test_options.VIDEO_FILE,
-        noAudio=not test_options.mpv_enable_audio,
-        autoStart=False,
+        no_audio=not test_options.mpv_enable_audio,
+        autostart=False,
     )
 
     # player.preroll()

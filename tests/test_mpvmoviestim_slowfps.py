@@ -52,8 +52,8 @@ def main() -> None:
         pos=(0, 0),
         size=(2, 2),
         monitor_framerate=1 / win.monitorFramePeriod,
-        flipHoriz=False,
-        flipVert=True,
+        flip_horiz=False,
+        flip_vert=True,
     )
 
     # print(f"{perf_counter() - t0:.3} | video-sync={player._player.video_sync}")
