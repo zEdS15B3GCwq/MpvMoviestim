@@ -819,19 +819,21 @@ class MpvMoviestim:
         self._player.loadfile(filename=str(file), mode="replace")
         self._loaded_movie = file
         logging.exp("waiting until paused")
-        self._mpv_wait(
-            lambda: self._player.wait_until_paused(timeout=TIMEOUT_DEFAULT_S),
-            f"Timed out waiting for MPV to reach a paused state after loading '{file}'.",
-        )
+        try:
+            self._player.wait_until_paused(timeout=TIMEOUT_DEFAULT_S)
+        except (TimeoutError, FutureTimeoutError, self._mpv_lib.ShutdownError) as e:
+            raise RuntimeError(
+                "An error occurred while waiting for MPV to reach a paused state."
+            ) from e
         self._state = MpvMoviestimState.PAUSED
 
         logging.exp("waiting for video params property")
-        self._mpv_wait(
-            lambda: self._player.wait_for_property(
-                "video-params", timeout=TIMEOUT_DEFAULT_S
-            ),
-            "Timed out waiting for 'video-params' property after loading movie.",
-        )
+        try:
+            self._player.wait_for_property("video-params", timeout=TIMEOUT_DEFAULT_S)
+        except (TimeoutError, FutureTimeoutError, self._mpv_lib.ShutdownError) as e:
+            raise RuntimeError(
+                "An error occurred while waiting for MPV to provide video parameters."
+            ) from e
         video_params = self._player.video_params
         self._media_size = video_params["w"], video_params["h"]
         if self._draw_rect is None:
@@ -855,10 +857,12 @@ class MpvMoviestim:
         # self._report_swap = False
         self._player.pause = False
         if block:
-            self._mpv_wait(
-                lambda: self._player.wait_until_playing(timeout=TIMEOUT_DEFAULT_S),
-                "Timed out waiting for MPV to start playing.",
-            )
+            try:
+                self._player.wait_until_playing(timeout=TIMEOUT_DEFAULT_S)
+            except (TimeoutError, FutureTimeoutError, self._mpv_lib.ShutdownError) as e:
+                raise RuntimeError(
+                    "An error occurred while waiting for MPV to start playing."
+                ) from e
         self._state = MpvMoviestimState.PLAYING
         logging.exp(
             "State change: PAUSED -> PLAYING"
@@ -870,10 +874,12 @@ class MpvMoviestim:
     def pause(self, block: bool = False) -> None:
         self._player.pause = True
         if block:
-            self._mpv_wait(
-                lambda: self._player.wait_until_paused(timeout=TIMEOUT_DEFAULT_S),
-                "Timed out waiting for MPV to pause.",
-            )
+            try:
+                self._player.wait_until_paused(timeout=TIMEOUT_DEFAULT_S)
+            except (TimeoutError, FutureTimeoutError, self._mpv_lib.ShutdownError) as e:
+                raise RuntimeError(
+                    "An error occurred while waiting for MPV to pause."
+                ) from e
         self._state = MpvMoviestimState.PAUSED
         logging.exp(
             "State change: PLAYING -> PAUSED"
@@ -898,12 +904,12 @@ class MpvMoviestim:
         # self._player.wait_for_shutdown()
         # self._player.stop()
         logging.info("idle-active wait")
-        self._mpv_wait(
-            lambda: self._player.wait_for_property(
-                "idle-active", timeout=TIMEOUT_DEFAULT_S
-            ),
-            "Timed out waiting for MPV to report idle-active during stop().",
-        )
+        try:
+            self._player.wait_for_property("idle-active", timeout=TIMEOUT_DEFAULT_S)
+        except (TimeoutError, FutureTimeoutError, self._mpv_lib.ShutdownError) as e:
+            raise RuntimeError(
+                "An error occurred while waiting for MPV to reach idle-active state."
+            ) from e
 
         # Drain the render worker BEFORE quitting the MPV core.  With
         # advanced_control=True a permanent hang results if we call
@@ -930,10 +936,12 @@ class MpvMoviestim:
         logging.info("quitting mpv")
         self._player.quit()
         logging.info("waiting for mpv shutdown")
-        self._mpv_wait(
-            lambda: self._player.wait_for_shutdown(timeout=TIMEOUT_DEFAULT_S),
-            "Timed out waiting for MPV core shutdown.",
-        )
+        try:
+            self._player.wait_for_shutdown(timeout=TIMEOUT_DEFAULT_S)
+        except (TimeoutError, FutureTimeoutError, self._mpv_lib.ShutdownError) as e:
+            raise RuntimeError(
+                "An error occurred while waiting for MPV core shutdown."
+            ) from e
         # Intermediate FBO/texture cleanup is handled inside the worker thread.
 
     # @log_pre_post
@@ -1061,7 +1069,7 @@ class MpvMoviestim:
         return self._state
 
     @property
-    def _mpv_state(self) -> MpvMoviestimState:
+    def _mpv_state(self) -> MpvMoviestimState:  # noqa: PLR0911
         # TODO: test
         if not hasattr(self, "_player") or self._player is None:
             return MpvMoviestimState.UNSPECIFIED
@@ -1076,41 +1084,3 @@ class MpvMoviestim:
         if self._player.eof_reached:
             return MpvMoviestimState.EOF_REACHED
         return MpvMoviestimState.UNSPECIFIED
-
-    def _mpv_wait(
-        self,
-        call: Callable[[], Any],
-        error_message: str,
-    ) -> Any:
-        """Run an MPV blocking wait call, converting timeouts to `TimeoutError`,
-        and re-raising mpv.ShutdownError on a player shutdown while waiting.
-
-        Parameters
-        ----------
-        call : Callable[[], Any]
-            A zero-argument callable wrapping the actual mpv wait call, e.g.
-            ``lambda: player.wait_until_paused(timeout=5.0)``.
-        error_message : str
-            Message to use when raising `TimeoutError` on timeout.
-
-        Returns
-        -------
-        Any
-            The return value of `call`, if any.
-
-        Raises
-        ------
-        TimeoutError
-            If the wait times out (covers both the builtin `TimeoutError` and
-            `concurrent.futures.TimeoutError`, which are distinct classes prior
-            to Python 3.11).
-        mpv.ShutdownError
-            Python-mpv raises this exception if the player is shut down during
-            the wait. This error is masked then waiting for shutdown, though.
-        """
-        try:
-            return call()
-        except (TimeoutError, FutureTimeoutError) as e:
-            raise TimeoutError(error_message) from e
-        except self._mpv_lib.ShutdownError as e:
-            raise RuntimeError("MPV core shut down unexpectedly while waiting.") from e
