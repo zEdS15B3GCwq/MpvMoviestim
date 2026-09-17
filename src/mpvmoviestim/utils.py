@@ -683,6 +683,9 @@ def create_shadow_window(main_window: Any) -> Any:
     """
 
     shadow_window = pyglet.window.Window(width=100, height=100, visible=False)
+    pyglet.app.windows.remove(
+        shadow_window
+    )  # keep it out of pyglet's global event/idle loop
 
     # is this necessary to hand-off context?
     # shadow_window.switch_to()  # redundant, already in Window.__init__()
