@@ -305,6 +305,10 @@ class ThreadingState:
     buffer_fbo_lock: threading.Lock = dataclasses.field(default_factory=threading.Lock)
     render_fences: list[Any] = dataclasses.field(default_factory=lambda: [None, None])
     blit_fences: list[Any] = dataclasses.field(default_factory=lambda: [None, None])
+    # frame numbers for each intermediate FBO
+    intermediate_fbo_frame_numbers: list[int] = dataclasses.field(
+        default_factory=lambda: [-1, -1]
+    )
 
     # Profiling (None when disabled)
     profiler: Profiler | None = None
@@ -714,6 +718,8 @@ class MpvMoviestim:
 
         ts.worker_init_done.set()  # unblock main thread
 
+        frame_count = 0
+
         # --- render loop ---
         while True:
             ts.render_trigger.wait()  # wait until the update callback is called
@@ -743,12 +749,17 @@ class MpvMoviestim:
             if not update_result:
                 continue
 
+            if self._nvtx_lib is not None:
+                self._nvtx_lib.push_range("worker", color=0x00FF00)
+
             # Set busy flag to tell main not to flip buffers while we're rendering.
             # If the main thread notices that we're rendering, it will wait for us
             # to finish so that it can blit the newest frame.
             # We essentially never need to wait for main as it only keeps the lock
             # while flipping buffers.
             ts.worker_render_done.clear()
+            if self._nvtx_lib is not None:
+                self._nvtx_lib.push_range("worker - waitlock", color=0x0000FF)
             if profiling_enabled:
                 cpu_record[base + indices.LOCK_T0] = perf_counter()
             with ts.buffer_fbo_lock:
@@ -756,12 +767,16 @@ class MpvMoviestim:
                 target_idx = ts.worker_fbo_idx
             if profiling_enabled:
                 cpu_record[base + indices.LOCK_T1] = perf_counter()
+            if self._nvtx_lib is not None:
+                self._nvtx_lib.pop_range()
 
             fbo_info = ts.intermediate_fbo_infos[target_idx]
 
             # The GPU may be still executing the main thread's blit from this FBO,
             # so we do a GPU-side wait before we overwrite it.
             if (blit_fence := ts.blit_fences[target_idx]) is not None:
+                if self._nvtx_lib is not None:
+                    self._nvtx_lib.push_range("worker - waitfence", color=0x008080)
                 if profiling_enabled:
                     cpu_record[base + indices.WAITSYNC_BLIT_T0] = perf_counter()
                     # zero-timeout poll: was the main thread's blit already done?
@@ -775,23 +790,34 @@ class MpvMoviestim:
                         else 3.0
                     )
                 gl.glWaitSync(blit_fence, 0, gl.GL_TIMEOUT_IGNORED)
-                # TODO: use timeout to avoid possible deadlock
                 gl.glDeleteSync(blit_fence)
                 ts.blit_fences[target_idx] = None
                 if profiling_enabled:
                     cpu_record[base + indices.WAITSYNC_BLIT_T1] = perf_counter()
+                if self._nvtx_lib is not None:
+                    self._nvtx_lib.pop_range()
 
             if profiling_enabled:
                 cpu_record[base + indices.RENDER_T0] = perf_counter()
                 gpu_timer.begin()
+            if self._nvtx_lib is not None:
+                self._nvtx_lib.push_range(
+                    f"worker - render (FBO: {target_idx}, frame: {frame_count})",
+                    color=0xFF0000,
+                )
             self._mpv_render_ctx.render(
                 opengl_fbo=fbo_info,
                 flip_y=True,
                 block_for_target_time=False,
             )
+            if self._nvtx_lib is not None:
+                self._nvtx_lib.pop_range()
             if profiling_enabled:
                 gpu_timer.end()
                 cpu_record[base + indices.RENDER_T1] = perf_counter()
+
+            ts.intermediate_fbo_frame_numbers[target_idx] = frame_count
+            frame_count += 1
 
             # Post a fence so the main thread can wait for this render to finish
             # before it blits.
@@ -826,13 +852,13 @@ class MpvMoviestim:
                 # main thread is never delayed by this profiling-only wait.
                 # This wait may have side effects as it can delay the next iteration.
                 assert done_fence is not None
-                cpu_record[base + indices.WAIT_DONE_T0] = perf_counter()
+                cpu_record[base + indices.WAITSYNC_DONE_T0] = perf_counter()
                 st = gl.glClientWaitSync(
                     done_fence, gl.GL_SYNC_FLUSH_COMMANDS_BIT, 1_000_000_000
                 )
                 gl.glDeleteSync(done_fence)
-                cpu_record[base + indices.WAIT_DONE_T1] = perf_counter()
-                cpu_record[base + indices.WAIT_DONE_STATE] = (
+                cpu_record[base + indices.WAITSYNC_DONE_T1] = perf_counter()
+                cpu_record[base + indices.WAITSYNC_DONE_STATE] = (
                     1.0
                     if st in (gl.GL_ALREADY_SIGNALED, gl.GL_CONDITION_SATISFIED)
                     else 2.0
@@ -841,8 +867,19 @@ class MpvMoviestim:
                 )
                 # blocking collect of GPU timing data, should not cause wait after fence
                 gpu_timer.collect()
-
                 cpu_record[base + indices.ITER_DONE_T] = perf_counter()
+
+            if self._nvtx_lib is not None:
+                # # same as done fence, but for NVTX profiling
+                # end_fence = gl.glFenceSync(gl.GL_SYNC_GPU_COMMANDS_COMPLETE, 0)
+                # gl.glFlush()
+                # # using gl.GL_SYNC_FLUSH_COMMANDS_BIT resulted in an GL_INVALID_VALUE error
+                # gl.glClientWaitSync(end_fence, 0, 1_000_000_000)
+                # # gl.glClientWaitSync(
+                # #     end_fence, gl.GL_SYNC_FLUSH_COMMANDS_BIT, 1_000_000_000
+                # # )
+                # gl.glDeleteSync(end_fence)
+                self._nvtx_lib.pop_range()
 
         # --- cleanup (shadow context still current on this thread) ---
         self._mpv_render_ctx.free()
@@ -1107,11 +1144,11 @@ class MpvMoviestim:
             return
 
         if self._nvtx_lib is not None:
-            self._nvtx_lib.rangePush("main - draw", color=0x00FF00)
+            self._nvtx_lib.push_range("main", color=0x00FF00)
 
         # Read the index of the most recently completed worker frame.
         if self._nvtx_lib is not None:
-            self._nvtx_lib.rangePush("main - waitlock", color=0x0000FF)
+            self._nvtx_lib.push_range("main - waitlock", color=0x0000FF)
         if profiling_enabled:
             cpu_record[base + indices.LOCK_T0] = perf_counter()
         with ts.buffer_fbo_lock:
@@ -1126,15 +1163,16 @@ class MpvMoviestim:
         if profiling_enabled:
             cpu_record[base + indices.LOCK_T1] = perf_counter()
         if self._nvtx_lib is not None:
-            self._nvtx_lib.rangePop()
+            self._nvtx_lib.pop_range()
 
         # if worker is mid-render: CPU-wait so we get the newest frame this cycle
         if self._nvtx_lib is not None:
-            self._nvtx_lib.rangePush("main - waitworker", color=0x000080)
+            self._nvtx_lib.push_range("main - waitworker", color=0x000080)
         if worker_is_rendering:
             if profiling_enabled:
                 cpu_record[base + indices.CPU_WAIT_T0] = perf_counter()
             ts.worker_render_done.wait()
+            # TODO: add timeout here, ~half the frame duration; display old frame if timeout occurs
             if profiling_enabled:
                 cpu_record[base + indices.CPU_WAIT_T1] = perf_counter()
             with ts.buffer_fbo_lock:
@@ -1146,7 +1184,7 @@ class MpvMoviestim:
                     )
                     ts.buffer_flip_required = False
         if self._nvtx_lib is not None:
-            self._nvtx_lib.rangePop()
+            self._nvtx_lib.pop_range()
 
         present_idx = ts.present_fbo_idx  # only main writes this; safe outside lock
 
@@ -1154,13 +1192,14 @@ class MpvMoviestim:
             logging.error("draw() called but no frame has been rendered yet.")
             return
 
+        frame_number = ts.intermediate_fbo_frame_numbers[present_idx]
         fbo_info = ts.intermediate_fbo_infos[present_idx]
 
         # GPU-side wait: stall the GPU command queue (not the CPU) until the
         # worker's render into this FBO is complete.
         if (render_fence := ts.render_fences[present_idx]) is not None:
             if self._nvtx_lib is not None:
-                self._nvtx_lib.rangePush("main - waitfence", color=0x008080)
+                self._nvtx_lib.push_range("main - waitfence", color=0x008080)
             if profiling_enabled:
                 cpu_record[base + indices.WAITSYNC_RENDER_T0] = perf_counter()
                 # zero-timeout poll: was the worker's render already done?
@@ -1181,7 +1220,7 @@ class MpvMoviestim:
             if profiling_enabled:
                 cpu_record[base + indices.WAITSYNC_RENDER_T1] = perf_counter()
             if self._nvtx_lib is not None:
-                self._nvtx_lib.rangePop()
+                self._nvtx_lib.pop_range()
 
         # Snapshot NEXT_FRAME_INFO while we have a frame available.
         # TODO: move this to worker
@@ -1195,7 +1234,10 @@ class MpvMoviestim:
             cpu_record[base + indices.BLIT_T0] = perf_counter()
             gpu_timer.begin()
         if self._nvtx_lib is not None:
-            self._nvtx_lib.rangePush("main - blit", color=0xFF0000)
+            self._nvtx_lib.push_range(
+                f"main - blit (FBO: {present_idx}, frame: {frame_number})",
+                color=0xFF0000,
+            )
         utils.blit_with_draw_rect(
             self._draw_rect,
             fbo_info["fbo"],
@@ -1203,6 +1245,8 @@ class MpvMoviestim:
             self.flip_horizontal,
             self.flip_vertical,
         )
+        if self._nvtx_lib is not None:
+            self._nvtx_lib.pop_range()
         if profiling_enabled:
             gpu_timer.end()
             cpu_record[base + indices.BLIT_T1] = perf_counter()
@@ -1220,18 +1264,30 @@ class MpvMoviestim:
             # Private fence (owned exclusively by the main thread) to avoid
             # racing the worker's waits on the shared blit fence.
             done_fence = gl.glFenceSync(gl.GL_SYNC_GPU_COMMANDS_COMPLETE, 0)
-            tw0 = perf_counter()
+            cpu_record[base + indices.WAITSYNC_DONE_T0] = perf_counter()
             st = gl.glClientWaitSync(
                 done_fence, gl.GL_SYNC_FLUSH_COMMANDS_BIT, 1_000_000_000
             )
             gl.glDeleteSync(done_fence)
-            tw1 = perf_counter()
-            cpu_record[base + indices.WAIT_DONE_DUR] = (
-                tw1 - tw0
+            cpu_record[base + indices.WAITSYNC_DONE_T1] = perf_counter()
+            cpu_record[base + indices.WAITSYNC_DONE_STATE] = (
+                1.0
                 if st in (gl.GL_ALREADY_SIGNALED, gl.GL_CONDITION_SATISFIED)
-                else -1.0
+                else 2.0
+                if st == gl.GL_TIMEOUT_EXPIRED
+                else 3.0
             )
-            cpu_record[base + indices.DRAW_EXIT_T] = tw1
+            gpu_timer.collect()
+            cpu_record[base + indices.DRAW_EXIT_T] = perf_counter()
+
+        if self._nvtx_lib is not None:
+            # # same as done fence, but for NVTX profiling
+            # end_fence = gl.glFenceSync(gl.GL_SYNC_GPU_COMMANDS_COMPLETE, 0)
+            # gl.glFlush()
+            # # gl.glClientWaitSync(end_fence, gl.GL_SYNC_FLUSH_COMMANDS_BIT, 1_000_000_000)
+            # gl.glClientWaitSync(end_fence, 0, 1_000_000_000)
+            # gl.glDeleteSync(end_fence)
+            self._nvtx_lib.pop_range()
 
     @_state_guard(allowed_state=MpvMoviestimState.PLAYING)
     def report_swap(self) -> None:

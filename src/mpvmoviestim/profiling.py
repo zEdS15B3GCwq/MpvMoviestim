@@ -66,9 +66,9 @@ class Worker_Timestamp_Indices:
     FENCE_POST_T: int
     FLIP_REQUEST_T: int
     SET_DONE_T: int
-    WAIT_DONE_T0: int
-    WAIT_DONE_T1: int
-    WAIT_DONE_STATE: int
+    WAITSYNC_DONE_T0: int
+    WAITSYNC_DONE_T1: int
+    WAITSYNC_DONE_STATE: int
     ITER_DONE_T: int
     GPU_RENDER_DUR: int
 
@@ -86,9 +86,9 @@ class Worker_Timestamp_Indices:
         "FENCE_POST_T",  # render fence posted (instant)
         "FLIP_REQUEST_T",  # request to flip buffer indices (instant)
         "SET_DONE_T",  # worker_render_done.set() (instant)
-        "WAIT_DONE_T0",  # blocking clientWaitSync start on private done-fence
-        "WAIT_DONE_T1",
-        "WAIT_DONE_STATE",  # 1=already done, 2=not ready, 3=failed
+        "WAITSYNC_DONE_T0",  # blocking clientWaitSync start on private done-fence
+        "WAITSYNC_DONE_T1",
+        "WAITSYNC_DONE_STATE",  # 1=already done, 2=not ready, 3=failed
         "ITER_DONE_T",  # ~when the GPU finished this iteration's render (instant)
         "GPU_RENDER_DUR",  # GL_TIME_ELAPSED duration of ctx.render() (seconds, filled late)
     )
@@ -112,9 +112,9 @@ class Render_Timestamp_Indices:
     BLIT_T0: int
     BLIT_T1: int
     FENCE_POST_T: int
-    WAIT_DONE_T0: int
-    WAIT_DONE_T1: int
-    WAIT_DONE_STATE: int
+    WAITSYNC_DONE_T0: int
+    WAITSYNC_DONE_T1: int
+    WAITSYNC_DONE_STATE: int
     DRAW_EXIT_T: int
     GPU_BLIT_DUR: int
 
@@ -131,9 +131,9 @@ class Render_Timestamp_Indices:
         "BLIT_T0",  # blit span (CPU-side command issue time)
         "BLIT_T1",
         "FENCE_POST_T",  # blit fence posted (instant)
-        "WAIT_DONE_T0",  # blocking clientWaitSync start on private done-fence
-        "WAIT_DONE_T1",
-        "WAIT_DONE_STATE",  # 1=already done, 2=not ready, 3=failed
+        "WAITSYNC_DONE_T0",  # blocking clientWaitSync start on private done-fence
+        "WAITSYNC_DONE_T1",
+        "WAITSYNC_DONE_STATE",  # 1=already done, 2=not ready, 3=failed
         "DRAW_EXIT_T",  # ~when the GPU finished this iteration's blit (instant)
         "GPU_BLIT_DUR",  # GL_TIME_ELAPSED duration of the blit (seconds, filled late)
     )
