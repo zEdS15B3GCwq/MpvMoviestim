@@ -242,7 +242,7 @@ class ThreadingState:
         The thread object for the rendering worker.
     shadow_window : BaseWindow | None
         The shadow window that provides the GL context for the worker thread.
-    intermediate_fbos : tuple[dict[str, int], dict[str, int]] | None
+    intermediate_fbo_infos : tuple[dict[str, int], dict[str, int]] | None
         The double-buffered intermediate FBOs used for rendering frames in the worker thread.
     intermediate_fbo_textures : tuple[int, int] | None
         Texture IDs for the intermediate FBOs, needed for cleanup.
@@ -250,9 +250,9 @@ class ThreadingState:
         The index of the intermediate FBO that is currently ready for presentation (blitting).
     worker_fbo_idx : int
         The index of the intermediate FBO that the worker thread is currently rendering into.
-    render_trigger : threading.Event
+    wakeup_worker_trigger : threading.Event
         Event set by the worker thread's MPV update callback to wake up the worker thread.
-    stop_event : threading.Event
+    stop_worker_event : threading.Event
         Event set by the main thread to signal the worker thread to stop and exit.
     worker_init_done : threading.Event
         Event set by the worker thread once it has completed initialization.
@@ -263,9 +263,9 @@ class ThreadingState:
     worker_render_done : threading.Event
         Event set by the worker thread once it has finished rendering a frame to wake up the main
         thread if it is waiting for the render to finish before blitting.
-    flip_required : bool
+    buffer_flip_required : bool
         Flag set by the worker thread to signal that the intermediate FBOs are ready to be flipped.
-    fbo_lock : threading.Lock
+    buffer_fbo_lock : threading.Lock
         Lock to protect access to the intermediate FBO indices and rendering flag when flipping
         between buffers.
     render_fences : list[Any]
@@ -276,9 +276,6 @@ class ThreadingState:
         List of OpenGL sync objects (fences) set by the main thread after blitting from an
         intermediate FBO, which the worker thread waits on before rendering a new frame into
         that FBO.
-    profiler : Profiler | None
-        The profiler instance when profiling is enabled, otherwise None. Created on the
-        main thread before the worker starts; treated as read-only afterwards.
     """
 
     # Core objects
@@ -292,8 +289,12 @@ class ThreadingState:
     worker_fbo_idx: int = 0
 
     # Synchronisation
-    render_trigger: threading.Event = dataclasses.field(default_factory=threading.Event)
-    stop_event: threading.Event = dataclasses.field(default_factory=threading.Event)
+    wakeup_worker_trigger: threading.Event = dataclasses.field(
+        default_factory=threading.Event
+    )
+    stop_worker_event: threading.Event = dataclasses.field(
+        default_factory=threading.Event
+    )
     worker_init_done: threading.Event = dataclasses.field(
         default_factory=threading.Event
     )
@@ -308,6 +309,7 @@ class ThreadingState:
 
 
 class MpvMoviestim:
+    # TODO: class docstring, w/ Attributes and init Parameters
     # PsychoPy
     _window: visual.Window
     _position: tuple[int | float, int | float]  # position in Psychopy units
@@ -620,9 +622,9 @@ class MpvMoviestim:
         update_cb, and should be called from the render thread.
         """
         ts = self._threading_state
-        trigger_is_set = ts.render_trigger.is_set()
+        trigger_is_set = ts.wakeup_worker_trigger.is_set()
         if not trigger_is_set:
-            ts.render_trigger.set()
+            ts.wakeup_worker_trigger.set()
 
     def _render_worker(self) -> None:
         """Worker thread: render new frames into intermediate buffers
@@ -679,8 +681,8 @@ class MpvMoviestim:
 
         # --- render loop ---
         while True:
-            ts.render_trigger.wait()  # wait until the update callback is called
-            ts.render_trigger.clear()
+            ts.wakeup_worker_trigger.wait()  # wait until the update callback is called
+            ts.wakeup_worker_trigger.clear()
 
             # drain pending MPV updates, check whether there's a new vframe ready
             update_result = self._mpv_render_ctx.update()
@@ -688,7 +690,7 @@ class MpvMoviestim:
             # if stop is signalled, exit
             # Stop is placed here to ensure updates are drained first
             # to avoid hanging MPV's core.
-            if ts.stop_event.is_set():
+            if ts.stop_worker_event.is_set():
                 break
 
             # Ignore callbacks when there is no new frame to render
@@ -896,6 +898,7 @@ class MpvMoviestim:
     )
     def stop(self) -> None:
         self._state = MpvMoviestimState.SHUTDOWN
+        # TODO: instead of shutting down, we could just unload the movie to allow playing another
         logging.exp(f"frame-drop-count: {self._player.frame_drop_count}")
 
         # Ask MPV to stop the current file and wait until it is idle.
@@ -916,8 +919,8 @@ class MpvMoviestim:
         # wait_for_shutdown() while the worker is still alive.
         logging.info("telling worker thread to stop")
         ts = self._threading_state
-        ts.stop_event.set()
-        ts.render_trigger.set()  # wake worker if it is blocked on .wait()
+        ts.stop_worker_event.set()
+        ts.wakeup_worker_trigger.set()  # wake worker if it is blocked on .wait()
         assert ts.worker_thread is not None, (
             "worker_thread must be set before stop() is called"
         )
