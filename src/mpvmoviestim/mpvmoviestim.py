@@ -564,7 +564,7 @@ class MpvMoviestim:
             )
         return bounding_rect
 
-    def _make_intermediate_fbo(self) -> tuple[dict[str, int], int]:
+    def _allocate_intermediate_fbo(self) -> tuple[dict[str, int], int]:
         """Allocate one intermediate FBO + backing texture on the current GL context.
 
         Must be called while the shadow (worker) context is current.
@@ -664,8 +664,8 @@ class MpvMoviestim:
         self._mpv_render_ctx.update_cb = self._mpv_update_callback
 
         # Double-buffered intermediate FBOs (created on the shadow context).
-        fbo1, tex1 = self._make_intermediate_fbo()
-        fbo2, tex2 = self._make_intermediate_fbo()
+        fbo1, tex1 = self._allocate_intermediate_fbo()
+        fbo2, tex2 = self._allocate_intermediate_fbo()
         ts.intermediate_fbo_infos = (
             fbo1,
             fbo2,

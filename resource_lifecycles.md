@@ -3,7 +3,7 @@
 ## Shared
 
 - _state
-  init, mpv init, load movie, start, pause, stop, eof
+  init; mpv init, load movie, start, pause, stop, eof
 
 ### Media
 
