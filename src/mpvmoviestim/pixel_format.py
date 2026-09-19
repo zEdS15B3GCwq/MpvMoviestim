@@ -116,9 +116,9 @@ def get_psychopy_fbo_info(
         blue_bits = _get_gl_int(int(gl.GL_BLUE_BITS))
         alpha_bits = _get_gl_int(int(gl.GL_ALPHA_BITS))
 
-        bpc = getattr(win, "bpc", None)
-        if bpc is not None:
-            print(f"Psychopy window reports {bpc} bits per channel (win.bpc).")
+        # bpc = getattr(win, "bpc", None)
+        # if bpc is not None:
+        #     print(f"Psychopy window reports {bpc} bits per channel (win.bpc).")
 
         internal_fmt = _infer_pixel_format_from_bpc(
             red_bits, green_bits, blue_bits, alpha_bits

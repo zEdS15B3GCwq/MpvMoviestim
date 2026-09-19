@@ -75,6 +75,7 @@ def main() -> None:
         if i == 200:
             print(f"{perf_counter() - t0:.3} | >>>> PAUSE")
             player.pause()
+            # could keep issuing draw(clearBuffer=False) here
             sleep(5.0)
             player.play()
             print(f"{perf_counter() - t0:.3} | >>>> PLAY")

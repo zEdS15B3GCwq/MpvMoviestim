@@ -11,7 +11,6 @@ from psychopy import logging
 from pyglet import gl
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
     from types import ModuleType
     from typing import Any
 
@@ -190,33 +189,6 @@ def create_texture(w: int, h: int, internal_format: int = gl.GL_RGBA8) -> int:
     gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_LINEAR)
     gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_S, gl.GL_CLAMP_TO_EDGE)
     gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_T, gl.GL_CLAMP_TO_EDGE)
-
-    # Pick texture storage format parameters
-    # incoming_format = getattr(gl, "GL_RGBA", gl.GL_RGBA)
-
-    # # Pick internal format according to requested format with fallback to GL_RGBA
-    # # This code is somewhat defensive in not assuming that the requested formats exist
-    # internal_format = gl.GL_RGBA8
-    # incoming_pixel_type = gl.GL_UNSIGNED_BYTE
-    # label = "GL_RGBA8"
-    # incoming_is_float = False
-    # label = ""
-    # if (
-    #     format.lower() == "rgba32f"
-    #     and (t := getattr(gl, "GL_RGBA32F", None)) is not None
-    # ):
-    #     internal_format = t
-    #     incoming_pixel_type = gl.GL_FLOAT
-    #     label = "GL_RGBA32F"
-    #     incoming_is_float = True
-    # elif (
-    #     format.lower() == "rgba16f"
-    #     and (t := getattr(gl, "GL_RGBA16F", None)) is not None
-    # ):
-    #     internal_format = t
-    #     incoming_pixel_type = gl.GL_FLOAT
-    #     label = "GL_RGBA16F"
-    #     incoming_is_float = True
 
     # lookup incoming format values in mapping; fail with error if unknown
     incoming_format, incoming_pixel_type, label = _PIXEL_FORMAT_MAP.get(
@@ -532,10 +504,9 @@ def blit_with_draw_rect(
     )
 
     # Restore FBOs
-    # gl.glBindFramebuffer(gl.GL_READ_FRAMEBUFFER, previous_read_FBO.value)
-    gl.glBindFramebuffer(gl.GL_READ_FRAMEBUFFER, previous_read_FBO)
+    gl.glBindFramebuffer(gl.GL_READ_FRAMEBUFFER, previous_read_FBO.value)
     # Restoring the draw FBO is unnecessary as we use the same target as PsychoPy
-    # gl.glBindFramebuffer(gl.GL_DRAW_FRAMEBUFFER, previous_draw_FBO)
+    # gl.glBindFramebuffer(gl.GL_DRAW_FRAMEBUFFER, previous_draw_FBO.value)
 
 
 # def test_blit(
@@ -737,31 +708,21 @@ def release_context() -> None:
     platform = pyglet.compat_platform
     if platform in ("win32", "cygwin"):
         try:
-            from pyglet.gl import wgl  # pylint: disable=import-outside-toplevel
+            wgl_lib = importlib.import_module("pyglet.gl.lib_wgl")
 
-            wgl.wglMakeCurrent(None, None)
-        except Exception:  # pylint: disable=broad-except
-            pass
+            wgl_lib.wglMakeCurrent(None, None)  # ty: ignore[unresolved-attribute]
+        except Exception as e:  # pylint: disable=broad-except  # noqa: BLE001
+            logging.error(f"Error when releasing OpenGL context on {platform}: {e}")
     elif platform.startswith("linux"):
         try:
-            from pyglet.gl import glx  # pylint: disable=import-outside-toplevel
+            glx_lib = importlib.import_module("pyglet.gl.lib_glx")
 
             ctx = pyglet.gl.current_context
             if ctx is not None:
-                glx.glXMakeCurrent(ctx._display, 0, None)
-        except Exception:  # pylint: disable=broad-except
-            pass
+                glx_lib.glXMakeCurrent(ctx._display, 0, None)  # pylint: disable=protected-access
+        except Exception as e:  # pylint: disable=broad-except  # noqa: BLE001
+            logging.error(f"Error when releasing OpenGL context on {platform}: {e}")
     # macOS: NSOpenGLContext.clearCurrentContext() — not required for our use-case
-
-
-def windows_set_scaling_aware() -> None:
-    """Tell Windows we're DPI-aware to get full screen resolution."""
-    if pyglet.compat_platform == "win32":
-        try:
-            ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_int64(-4))
-            print("Windows dpi-ware process context set successfully")
-        except Exception as e:  # pylint: disable=W0718
-            print(f"WARNING: failed to set process DPI awareness context: {e}")
 
 
 def windows_get_screen_dpi() -> tuple[int, int] | None:
@@ -774,7 +735,7 @@ def windows_get_screen_dpi() -> tuple[int, int] | None:
             dpi_y = ctypes.windll.gdi32.GetDeviceCaps(hdc, 90)  # LOGPIXELSY
             return dpi_x, dpi_y
         except Exception as e:  # pylint: disable=W0718  # noqa: BLE001
-            print(f"WARNING: failed to get active screen DPI: {e}")
+            logging.error(f"Error when getting active screen DPI: {e}")
     return None
 
 
@@ -793,13 +754,13 @@ def windows_set_process_dpi_awareness(level: bool | int = True):
         -4: DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2
     """
     if pyglet.compat_platform != "win32":
-        print("Error: this function is only supported on Windows.")
+        logging.error("Error: this function is only supported on Windows.")
     if isinstance(level, bool):
         level = -2 if level else -1
     elif not isinstance(level, int):
         raise TypeError("level must be a bool or int")
     try:
         ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_int64(level))
-        print(f"Windows process DPI awareness context set to {level}")
-    except Exception as e:  # pylint: disable=W0718
-        print(f"WARNING: failed to set process DPI awareness context: {e}")
+        logging.info(f"Windows process DPI awareness context set to {level}")
+    except Exception as e:  # pylint: disable=W0718  #  noqa: BLE001
+        logging.error(f"Error when setting process DPI awareness context: {e}")
