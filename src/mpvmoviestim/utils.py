@@ -61,8 +61,8 @@ def _resolve_gl_proc_with_pyglet(name: bytes) -> int:
 
     platform = pyglet.compat_platform
 
-    def _try_lib_export(lib: ModuleType, nm: str) -> int | None:
-        func = getattr(lib, nm, None)
+    def _try_lib_export(lib: ModuleType, name: str) -> int | None:
+        func = getattr(lib, name, None)
         if func is not None:
             try:
                 val = ctypes.cast(func, ctypes.c_void_p).value
@@ -72,6 +72,10 @@ def _resolve_gl_proc_with_pyglet(name: bytes) -> int:
             if val is not None:
                 return int(val)
         return None
+
+    logging.info(
+        f"Resolving OpenGL function {name_str} using pyglet backend for platform {platform}"
+    )
 
     # Windows
     if platform in ("win32", "cygwin"):
@@ -100,7 +104,7 @@ def _resolve_gl_proc_with_pyglet(name: bytes) -> int:
         pyglet_lib = importlib.import_module(pyglet_lib_name)
     except ImportError:
         logging.error(
-            f"Pyglet's platform-specific OpenGL library {pyglet_lib_name} not found",
+            f"Pyglet's platform-specific OpenGL library {pyglet_lib_name} not found"
         )
         return 0
 
@@ -130,7 +134,7 @@ def _resolve_gl_proc_with_pyglet(name: bytes) -> int:
 
 
 def get_proc_address(_ctx: MpvRenderContext, name: bytes) -> int:
-    """Return GL function address or 0.
+    """Return GL function address, or 0 if not available or on error.
 
     Parameters
     ----------
@@ -147,7 +151,7 @@ def get_proc_address(_ctx: MpvRenderContext, name: bytes) -> int:
     try:
         return _resolve_gl_proc_with_pyglet(name)
     except Exception as e:  # pylint: disable=W0718  # noqa: BLE001
-        logging.warning(f"get_proc_address unexpected error: {e}")
+        logging.error(f"get_proc_address encountered an unexpected error: {e}")
         return 0
 
 
@@ -303,157 +307,157 @@ def destroy_fbo(fbo_id: int) -> None:
         gl.glDeleteFramebuffers(1, ctypes.byref(f))
 
 
-def _intersect_rect(
-    a: tuple[int, int, int, int], b: tuple[int, int, int, int]
-) -> tuple[int, int, int, int] | None:
-    """Calculate intersection of two rectangles.
+# def _intersect_rect(
+#     a: tuple[int, int, int, int], b: tuple[int, int, int, int]
+# ) -> tuple[int, int, int, int] | None:
+#     """Calculate intersection of two rectangles.
 
-    Parameters
-    ----------
-    a, b : tuple[int, int, int, int]
-        Rectangles as (x, y, w, h).
+#     Parameters
+#     ----------
+#     a, b : tuple[int, int, int, int]
+#         Rectangles as (x, y, w, h).
 
-    Returns
-    -------
-    tuple[int, int, int, int] or None
-        Intersection as (x, y, w, h), or None if empty.
+#     Returns
+#     -------
+#     tuple[int, int, int, int] or None
+#         Intersection as (x, y, w, h), or None if empty.
 
-    Notes
-    -----
-    * if-else clauses are much faster than min/max().
-    """
-    ax, ay, aw, ah = a
-    bx, by, bw, bh = b
-    x0 = ax if ax > bx else bx  # max
-    y0 = ay if ay > by else by
-    x1 = ax + aw if ax + aw < bx + bw else bx + bw  # min
-    y1 = ay + ah if ay + ah < by + bh else by + bh
-    if x1 <= x0 or y1 <= y0:
-        # return (0, 0, -1, -1)
-        return None
-    return (x0, y0, x1 - x0, y1 - y0)
-
-
-def _intersect_screen_rect(
-    scr: tuple[int, int], rect: tuple[int, int, int, int]
-) -> tuple[int, int, int, int] | None:
-    """Calculate intersection of a rectangle and the screen.
-
-    Parameters
-    ----------
-    scr : tuple[int, int]
-        Screen size as (width, height).
-    rect : tuple[int, int, int, int]
-        Rectangle as (x, y, w, h)
+#     Notes
+#     -----
+#     * if-else clauses are much faster than min/max().
+#     """
+#     ax, ay, aw, ah = a
+#     bx, by, bw, bh = b
+#     x0 = ax if ax > bx else bx  # max
+#     y0 = ay if ay > by else by
+#     x1 = ax + aw if ax + aw < bx + bw else bx + bw  # min
+#     y1 = ay + ah if ay + ah < by + bh else by + bh
+#     if x1 <= x0 or y1 <= y0:
+#         # return (0, 0, -1, -1)
+#         return None
+#     return (x0, y0, x1 - x0, y1 - y0)
 
 
-    Returns
-    -------
-    tuple[int, int, int, int] or None
-        Intersection as (x, y, w, h), or None if empty.
+# def _intersect_screen_rect(
+#     scr: tuple[int, int], rect: tuple[int, int, int, int]
+# ) -> tuple[int, int, int, int] | None:
+#     """Calculate intersection of a rectangle and the screen.
 
-    Notes
-    -----
-    * if-else clauses are much faster than min/max().
-    """
-    aw, ah = scr
-    bx, by, bw, bh = rect
-    x0 = bx if bx > 0 else 0  # max
-    y0 = by if by > 0 else 0
-    x1 = aw if aw < bx + bw else bx + bw  # min
-    y1 = ah if ah < by + bh else by + bh
-    if x1 <= x0 or y1 <= y0:
-        # return (0, 0, -1, -1)
-        return None
-    return (x0, y0, x1 - x0, y1 - y0)
+#     Parameters
+#     ----------
+#     scr : tuple[int, int]
+#         Screen size as (width, height).
+#     rect : tuple[int, int, int, int]
+#         Rectangle as (x, y, w, h)
 
 
-# TODO: test if the if shortcuts make it faster or slower
-def get_blit_fn(
-    src_size: tuple[int, int],
-    dst_rect: tuple[int, int, int, int],
-    win_size: tuple[int, int],
-    # ) -> Callable[[int, int], None] | None:
-) -> Callable[[], None] | None:
-    """
-    Return a blit function with parameters fixed except for FBO IDs.
+#     Returns
+#     -------
+#     tuple[int, int, int, int] or None
+#         Intersection as (x, y, w, h), or None if empty.
 
-    Source and target coordinates for the OpenGL glBlitFramebuffer
-    function are calculated once and then reused each time the returned
-    blit function is called. When the target coordinates change, a new
-    blit function has to be created.
+#     Notes
+#     -----
+#     * if-else clauses are much faster than min/max().
+#     """
+#     aw, ah = scr
+#     bx, by, bw, bh = rect
+#     x0 = bx if bx > 0 else 0  # max
+#     y0 = by if by > 0 else 0
+#     x1 = aw if aw < bx + bw else bx + bw  # min
+#     y1 = ah if ah < by + bh else by + bh
+#     if x1 <= x0 or y1 <= y0:
+#         # return (0, 0, -1, -1)
+#         return None
+#     return (x0, y0, x1 - x0, y1 - y0)
 
-    Coordinates change on:
-    * window resize
-    * source resize
-    * target rectangle resize / move
 
-    Parameters
-    ----------
-    src_size : tuple[int, int]
-        Source size as (width, height).
-    dst_rect : tuple[int, int, int, int]
-        Destination rectangle as (x, y, w, h).
-    win_size : tuple[int, int]
-        Window size as (width, height).
+# # TODO: test if the if shortcuts make it faster or slower
+# def get_blit_fn(
+#     src_size: tuple[int, int],
+#     dst_rect: tuple[int, int, int, int],
+#     win_size: tuple[int, int],
+#     # ) -> Callable[[int, int], None] | None:
+# ) -> Callable[[], None] | None:
+#     """
+#     Return a blit function with parameters fixed except for FBO IDs.
 
-    Returns
-    -------
-    Callable[[int, int], None] | None
-        Blit function: blit(source_FBO, dest_FBO)
-        or None if destination rectangle falls outside of the window.
-    """
-    dst_clipped = _intersect_screen_rect(win_size, dst_rect)
-    if dst_clipped is None:
-        return None
+#     Source and target coordinates for the OpenGL glBlitFramebuffer
+#     function are calculated once and then reused each time the returned
+#     blit function is called. When the target coordinates change, a new
+#     blit function has to be created.
 
-    sw, sh = src_size
-    dx, dy, dw, dh = dst_rect
-    w_ratio = sw / float(dw)
-    h_ratio = sh / float(dh)
-    cx, cy, cw, ch = dst_clipped
+#     Coordinates change on:
+#     * window resize
+#     * source resize
+#     * target rectangle resize / move
 
-    # Proportional source rect
-    # bottom-left point: if no clip on target's bottom-left, it means it's inside the screen,
-    #                    so we can start from source's (0,0)
-    sx0 = 0 if cx == dx else int((cx - dx) * w_ratio)
-    sy0 = 0 if cy == dy else int((cy - dy) * h_ratio)
-    # top-right point: if no clip on target's top-right, then (sw,sh)
-    # sx1 = sw if cx1 == dx1 else int(sw - (dx1 - cx1) * w_ratio)
-    # sy1 = sh if cy1 == dy1 else int(sh - (dy1 - cy1) * h_ratio)
-    sx1 = sw if cx + cw == dx + dw else sx0 + int(cw * w_ratio)
-    sy1 = sh if cy + ch == dy + dh else sy0 + int(ch * h_ratio)
+#     Parameters
+#     ----------
+#     src_size : tuple[int, int]
+#         Source size as (width, height).
+#     dst_rect : tuple[int, int, int, int]
+#         Destination rectangle as (x, y, w, h).
+#     win_size : tuple[int, int]
+#         Window size as (width, height).
 
-    # If source and dest are same size and aligned, use nearest for speed/sharpness
-    filter_type = (
-        gl.GL_NEAREST if ((sx1 - sx0) == cw and (sy1 - sy0) == ch) else gl.GL_LINEAR
-    )
+#     Returns
+#     -------
+#     Callable[[int, int], None] | None
+#         Blit function: blit(source_FBO, dest_FBO)
+#         or None if destination rectangle falls outside of the window.
+#     """
+#     dst_clipped = _intersect_screen_rect(win_size, dst_rect)
+#     if dst_clipped is None:
+#         return None
 
-    # def blit_fn(src_fbo, draw_fbo):
-    def blit_fn():
-        # Bind FBOs
-        # gl.glBindFramebuffer(gl.GL_READ_FRAMEBUFFER, src_fbo)
-        # gl.glBindFramebuffer(gl.GL_DRAW_FRAMEBUFFER, draw_fbo)
+#     sw, sh = src_size
+#     dx, dy, dw, dh = dst_rect
+#     w_ratio = sw / float(dw)
+#     h_ratio = sh / float(dh)
+#     cx, cy, cw, ch = dst_clipped
 
-        # Draw
-        gl.glBlitFramebuffer(
-            sx0,
-            sy0,
-            sx1,
-            sy1,
-            cx,
-            cy,
-            cx + cw,
-            cy + ch,
-            gl.GL_COLOR_BUFFER_BIT,
-            filter_type,
-        )
+#     # Proportional source rect
+#     # bottom-left point: if no clip on target's bottom-left, it means it's inside the screen,
+#     #                    so we can start from source's (0,0)
+#     sx0 = 0 if cx == dx else int((cx - dx) * w_ratio)
+#     sy0 = 0 if cy == dy else int((cy - dy) * h_ratio)
+#     # top-right point: if no clip on target's top-right, then (sw,sh)
+#     # sx1 = sw if cx1 == dx1 else int(sw - (dx1 - cx1) * w_ratio)
+#     # sy1 = sh if cy1 == dy1 else int(sh - (dy1 - cy1) * h_ratio)
+#     sx1 = sw if cx + cw == dx + dw else sx0 + int(cw * w_ratio)
+#     sy1 = sh if cy + ch == dy + dh else sy0 + int(ch * h_ratio)
 
-        # Unbind FBOs
-        # gl.glBindFramebuffer(gl.GL_READ_FRAMEBUFFER, 0)
-        # gl.glBindFramebuffer(gl.GL_DRAW_FRAMEBUFFER, 0)
+#     # If source and dest are same size and aligned, use nearest for speed/sharpness
+#     filter_type = (
+#         gl.GL_NEAREST if ((sx1 - sx0) == cw and (sy1 - sy0) == ch) else gl.GL_LINEAR
+#     )
 
-    return blit_fn
+#     # def blit_fn(src_fbo, draw_fbo):
+#     def blit_fn():
+#         # Bind FBOs
+#         # gl.glBindFramebuffer(gl.GL_READ_FRAMEBUFFER, src_fbo)
+#         # gl.glBindFramebuffer(gl.GL_DRAW_FRAMEBUFFER, draw_fbo)
+
+#         # Draw
+#         gl.glBlitFramebuffer(
+#             sx0,
+#             sy0,
+#             sx1,
+#             sy1,
+#             cx,
+#             cy,
+#             cx + cw,
+#             cy + ch,
+#             gl.GL_COLOR_BUFFER_BIT,
+#             filter_type,
+#         )
+
+#         # Unbind FBOs
+#         # gl.glBindFramebuffer(gl.GL_READ_FRAMEBUFFER, 0)
+#         # gl.glBindFramebuffer(gl.GL_DRAW_FRAMEBUFFER, 0)
+
+#     return blit_fn
 
 
 def blit_with_draw_rect(
@@ -528,138 +532,137 @@ def blit_with_draw_rect(
     )
 
     # Restore FBOs
-    gl.glBindFramebuffer(gl.GL_READ_FRAMEBUFFER, previous_read_FBO.value)
-    # gl.glBindFramebuffer(gl.GL_READ_FRAMEBUFFER, previous_read_FBO)
-    # Restoring the draw FBO is unnecessary as we use the same target as PsychoPy
-    # gl.glBindFramebuffer(gl.GL_DRAW_FRAMEBUFFER, previous_draw_FBO)
-
-
-# TODO: simple blit without resizing, assuming same-size render, let gl take care of clips
-def test_blit(
-    src_size: tuple[int, int],
-    dst_rect: tuple[int, int, int, int],
-    win_size: tuple[int, int],
-    src_fbo: int,
-    draw_fbo: int,
-) -> None:
-    """
-    do blit (for testing pre-blit calculation performance)
-    """
-    dst_clipped = _intersect_screen_rect(win_size, dst_rect)
-    if dst_clipped is None:
-        return None
-
-    sw, sh = src_size
-    dx, dy, dw, dh = dst_rect
-    w_ratio = sw / float(dw)
-    h_ratio = sh / float(dh)
-    cx, cy, cw, ch = dst_clipped
-
-    # Proportional source rect
-    # bottom-left point: if no clip on target's bottom-left, it means it's inside the screen,
-    #                    so we can start from source's (0,0)
-    sx0 = 0 if cx == dx else int((cx - dx) * w_ratio)
-    sy0 = 0 if cy == dy else int((cy - dy) * h_ratio)
-    # top-right point: if no clip on target's top-right, then (sw,sh)
-    # sx1 = sw if cx1 == dx1 else int(sw - (dx1 - cx1) * w_ratio)
-    # sy1 = sh if cy1 == dy1 else int(sh - (dy1 - cy1) * h_ratio)
-    sx1 = sw if cx + cw == dx + dw else sx0 + int(cw * w_ratio)
-    sy1 = sh if cy + ch == dy + dh else sy0 + int(ch * h_ratio)
-
-    # If source and dest are same size and aligned, use nearest for speed/sharpness
-    filter_type = (
-        gl.GL_NEAREST if ((sx1 - sx0) == cw and (sy1 - sy0) == ch) else gl.GL_LINEAR
-    )
-
-    # FBO handling
-    # PsychoPy's strategy is to set the FBOs once, and use textured quad draws
-    # to it without setting them again.
-
-    # Save previously bound FBOs
-    previous_read_FBO = gl.glGetInteger(gl.GL_READ_FRAMEBUFFER_BINDING)
-    # Saving the draw FBO is unnecessary as we don't restore it
-    previous_draw_FBO = gl.glGetInteger(gl.GL_DRAW_FRAMEBUFFER_BINDING)
-
-    # Bind FBOs
-    gl.glBindFramebuffer(gl.GL_READ_FRAMEBUFFER, src_fbo)
-    gl.glBindFramebuffer(gl.GL_DRAW_FRAMEBUFFER, draw_fbo)
-
-    # Draw
-    gl.glBlitFramebuffer(
-        sx0,
-        sy0,
-        sx1,
-        sy1,
-        cx,
-        cy,
-        cx + cw,
-        cy + ch,
-        gl.GL_COLOR_BUFFER_BIT,
-        filter_type,
-    )
-
-    # Restore FBOs
+    # gl.glBindFramebuffer(gl.GL_READ_FRAMEBUFFER, previous_read_FBO.value)
     gl.glBindFramebuffer(gl.GL_READ_FRAMEBUFFER, previous_read_FBO)
     # Restoring the draw FBO is unnecessary as we use the same target as PsychoPy
     # gl.glBindFramebuffer(gl.GL_DRAW_FRAMEBUFFER, previous_draw_FBO)
 
 
-def test_blit_clip_no_resize(
-    src_size: tuple[int, int],
-    dst_rect: tuple[int, int, int, int],
-    win_size: tuple[int, int],
-    src_fbo: int,
-    draw_fbo: int,
-) -> None:
-    """
-    do blit (without any resizing or clip calculation)
+# def test_blit(
+#     src_size: tuple[int, int],
+#     dst_rect: tuple[int, int, int, int],
+#     win_size: tuple[int, int],
+#     src_fbo: int,
+#     draw_fbo: int,
+# ) -> None:
+#     """
+#     do blit (for testing pre-blit calculation performance)
+#     """
+#     dst_clipped = _intersect_screen_rect(win_size, dst_rect)
+#     if dst_clipped is None:
+#         return None
 
-    OpenGL may be able to take care of clipping
-    Resizing should be unnecessary if FBO allocation is changed in a way
-    so that the largest possible size of texture is allocated and then
-    only a portion of it is used for drawing if the element is resized smaller.
-    """
-    dst_clipped = _intersect_screen_rect(win_size, dst_rect)
-    if dst_clipped is None:
-        return None
+#     sw, sh = src_size
+#     dx, dy, dw, dh = dst_rect
+#     w_ratio = sw / float(dw)
+#     h_ratio = sh / float(dh)
+#     cx, cy, cw, ch = dst_clipped
 
-    sw, sh = src_size
-    dx, dy, dw, dh = dst_rect
+#     # Proportional source rect
+#     # bottom-left point: if no clip on target's bottom-left, it means it's inside the screen,
+#     #                    so we can start from source's (0,0)
+#     sx0 = 0 if cx == dx else int((cx - dx) * w_ratio)
+#     sy0 = 0 if cy == dy else int((cy - dy) * h_ratio)
+#     # top-right point: if no clip on target's top-right, then (sw,sh)
+#     # sx1 = sw if cx1 == dx1 else int(sw - (dx1 - cx1) * w_ratio)
+#     # sy1 = sh if cy1 == dy1 else int(sh - (dy1 - cy1) * h_ratio)
+#     sx1 = sw if cx + cw == dx + dw else sx0 + int(cw * w_ratio)
+#     sy1 = sh if cy + ch == dy + dh else sy0 + int(ch * h_ratio)
 
-    # source and dest are supposed to be the same size, use nearest for speed/sharpness
-    filter_type = gl.GL_NEAREST
+#     # If source and dest are same size and aligned, use nearest for speed/sharpness
+#     filter_type = (
+#         gl.GL_NEAREST if ((sx1 - sx0) == cw and (sy1 - sy0) == ch) else gl.GL_LINEAR
+#     )
 
-    # FBO handling
-    # PsychoPy's strategy is to set the FBOs once, and use textured quad draws
-    # to it without setting them again.
+#     # FBO handling
+#     # PsychoPy's strategy is to set the FBOs once, and use textured quad draws
+#     # to it without setting them again.
 
-    # Save previously bound FBOs
-    previous_read_FBO = gl.glGetInteger(gl.GL_READ_FRAMEBUFFER_BINDING)
-    # Saving the draw FBO is unnecessary as we don't restore it
-    # previous_draw_FBO = gl.glGetInteger(gl.GL_DRAW_FRAMEBUFFER_BINDING)
+#     # Save previously bound FBOs
+#     previous_read_FBO = gl.glGetInteger(gl.GL_READ_FRAMEBUFFER_BINDING)
+#     # Saving the draw FBO is unnecessary as we don't restore it
+#     previous_draw_FBO = gl.glGetInteger(gl.GL_DRAW_FRAMEBUFFER_BINDING)
 
-    # Bind FBOs
-    gl.glBindFramebuffer(gl.GL_READ_FRAMEBUFFER, src_fbo)
-    gl.glBindFramebuffer(gl.GL_DRAW_FRAMEBUFFER, draw_fbo)
+#     # Bind FBOs
+#     gl.glBindFramebuffer(gl.GL_READ_FRAMEBUFFER, src_fbo)
+#     gl.glBindFramebuffer(gl.GL_DRAW_FRAMEBUFFER, draw_fbo)
 
-    # Draw
-    gl.glBlitFramebuffer(
-        0,
-        0,
-        sw,
-        sh,
-        dx,
-        dy,
-        dx + dw,
-        dy + dh,
-        gl.GL_COLOR_BUFFER_BIT,
-        filter_type,
-    )
+#     # Draw
+#     gl.glBlitFramebuffer(
+#         sx0,
+#         sy0,
+#         sx1,
+#         sy1,
+#         cx,
+#         cy,
+#         cx + cw,
+#         cy + ch,
+#         gl.GL_COLOR_BUFFER_BIT,
+#         filter_type,
+#     )
 
-    # Restore FBOs
-    gl.glBindFramebuffer(gl.GL_READ_FRAMEBUFFER, previous_read_FBO)
-    # Restoring the draw FBO is unnecessary as we use the same target as PsychoPy
-    # gl.glBindFramebuffer(gl.GL_DRAW_FRAMEBUFFER, previous_draw_FBO)
+#     # Restore FBOs
+#     gl.glBindFramebuffer(gl.GL_READ_FRAMEBUFFER, previous_read_FBO)
+#     # Restoring the draw FBO is unnecessary as we use the same target as PsychoPy
+#     # gl.glBindFramebuffer(gl.GL_DRAW_FRAMEBUFFER, previous_draw_FBO)
+
+
+# def test_blit_clip_no_resize(
+#     src_size: tuple[int, int],
+#     dst_rect: tuple[int, int, int, int],
+#     win_size: tuple[int, int],
+#     src_fbo: int,
+#     draw_fbo: int,
+# ) -> None:
+#     """
+#     do blit (without any resizing or clip calculation)
+
+#     OpenGL may be able to take care of clipping
+#     Resizing should be unnecessary if FBO allocation is changed in a way
+#     so that the largest possible size of texture is allocated and then
+#     only a portion of it is used for drawing if the element is resized smaller.
+#     """
+#     dst_clipped = _intersect_screen_rect(win_size, dst_rect)
+#     if dst_clipped is None:
+#         return None
+
+#     sw, sh = src_size
+#     dx, dy, dw, dh = dst_rect
+
+#     # source and dest are supposed to be the same size, use nearest for speed/sharpness
+#     filter_type = gl.GL_NEAREST
+
+#     # FBO handling
+#     # PsychoPy's strategy is to set the FBOs once, and use textured quad draws
+#     # to it without setting them again.
+
+#     # Save previously bound FBOs
+#     previous_read_FBO = gl.glGetInteger(gl.GL_READ_FRAMEBUFFER_BINDING)
+#     # Saving the draw FBO is unnecessary as we don't restore it
+#     # previous_draw_FBO = gl.glGetInteger(gl.GL_DRAW_FRAMEBUFFER_BINDING)
+
+#     # Bind FBOs
+#     gl.glBindFramebuffer(gl.GL_READ_FRAMEBUFFER, src_fbo)
+#     gl.glBindFramebuffer(gl.GL_DRAW_FRAMEBUFFER, draw_fbo)
+
+#     # Draw
+#     gl.glBlitFramebuffer(
+#         0,
+#         0,
+#         sw,
+#         sh,
+#         dx,
+#         dy,
+#         dx + dw,
+#         dy + dh,
+#         gl.GL_COLOR_BUFFER_BIT,
+#         filter_type,
+#     )
+
+#     # Restore FBOs
+#     gl.glBindFramebuffer(gl.GL_READ_FRAMEBUFFER, previous_read_FBO)
+#     # Restoring the draw FBO is unnecessary as we use the same target as PsychoPy
+#     # gl.glBindFramebuffer(gl.GL_DRAW_FRAMEBUFFER, previous_draw_FBO)
 
 
 def create_shadow_window(main_window: BaseWindow) -> BaseWindow:
