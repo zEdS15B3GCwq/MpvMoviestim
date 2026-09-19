@@ -146,7 +146,7 @@ def get_proc_address(_ctx: MpvRenderContext, name: bytes) -> int:
     """
     try:
         return _resolve_gl_proc_with_pyglet(name)
-    except Exception as e:  # pylint: disable=W0718
+    except Exception as e:  # pylint: disable=W0718  # noqa: BLE001
         logging.warning(f"get_proc_address unexpected error: {e}")
         return 0
 
@@ -663,7 +663,7 @@ def test_blit_clip_no_resize(
 
 
 def create_shadow_window(main_window: BaseWindow) -> BaseWindow:
-    """Create an invisible pyglet window that shares *main_window*'s OpenGL context.
+    """Create an invisible pyglet window that shares `main_window`'s OpenGL context.
 
     Parameters
     ----------
@@ -678,24 +678,24 @@ def create_shadow_window(main_window: BaseWindow) -> BaseWindow:
 
     Notes
     -----
-    ``create_context()`` with shared context doesn't work with pyglet 1.4/1.5,
+    `create_context()` with shared context doesn't work with pyglet 1.4/1.5,
     so we create a hidden window instead, and rely on pyglet's internal context
     sharing behavior.
     """
 
     shadow_window = pyglet.window.Window(width=100, height=100, visible=False)
-    pyglet.app.windows.remove(
-        shadow_window
-    )  # keep it out of pyglet's global event/idle loop to prevent crashin on window move
 
-    # is this necessary to hand-off context?
+    # keep shadow window out of pyglet's global event/idle loop
+    # to prevent crashing on window move
+    pyglet.app.windows.remove(shadow_window)
+
     # shadow_window.switch_to()  # redundant, already in Window.__init__()
-    # gl.current_context = None  # redundant, has no effect?
 
     # Restore the main window's context as current on this thread (shadow
     # window's __init__ made its own context current).
     main_window.switch_to()
     main_window.activate()
+
     # gl.current_context = main_window.context  # already set by switch_to()
 
     return shadow_window
@@ -770,6 +770,33 @@ def windows_get_screen_dpi() -> tuple[int, int] | None:
             dpi_x = ctypes.windll.gdi32.GetDeviceCaps(hdc, 88)  # LOGPIXELSX
             dpi_y = ctypes.windll.gdi32.GetDeviceCaps(hdc, 90)  # LOGPIXELSY
             return dpi_x, dpi_y
-        except Exception as e:  # pylint: disable=W0718
+        except Exception as e:  # pylint: disable=W0718  # noqa: BLE001
             print(f"WARNING: failed to get active screen DPI: {e}")
     return None
+
+
+def windows_set_process_dpi_awareness(level: bool | int = True):
+    """Set Windows process DPI awareness level.
+
+    Parameters
+    ----------
+    level : bool or int
+        If True, set to "system" awareness.
+        If False, set to "unaware".
+        If int, use the corresponding DPI_AWARENESS_CONTEXT value:
+        -1: DPI_AWARENESS_CONTEXT_UNAWARE
+        -2: DPI_AWARENESS_CONTEXT_SYSTEM_AWARE
+        -3: DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE
+        -4: DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2
+    """
+    if pyglet.compat_platform != "win32":
+        print("Error: this function is only supported on Windows.")
+    if isinstance(level, bool):
+        level = -2 if level else -1
+    elif not isinstance(level, int):
+        raise TypeError("level must be a bool or int")
+    try:
+        ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_int64(level))
+        print(f"Windows process DPI awareness context set to {level}")
+    except Exception as e:  # pylint: disable=W0718
+        print(f"WARNING: failed to set process DPI awareness context: {e}")

@@ -65,6 +65,7 @@ from types import ModuleType
 from typing import TYPE_CHECKING, ParamSpec, TypeVar, cast
 
 import pyglet
+from numexpr.necompiler import double
 from psychopy import logging, visual
 from psychopy.tools.monitorunittools import convertToPix
 from pyglet import gl
@@ -394,6 +395,8 @@ class MpvMoviestim:
         # self._report_swap = False
 
         # infer FBO information (size, pixel format) for the PsychoPy window
+        # Resizing controls for the PP window are disabled so target FBO size
+        # won't change during playback.
         self._init_target_fbo()
         # TODO: if target FBO is set here, what happens if the window is resized?
 
@@ -402,10 +405,10 @@ class MpvMoviestim:
 
         self._state = MpvMoviestimState.NO_MEDIA
 
-        # Synchronisation primitives — must exist before worker thread starts.
-        # self._threading_state = ThreadingState()
-
-        # TODO: direct rendering / no buffer when media > screen fps, worker thread only update_cb
+        # Enable threaded, double-buffered mode
+        # synchronisation primitives must exist before worker thread starts
+        if double_buffering:
+            self._threading_state = ThreadingState()
 
         # load movie if specified
         if file is not None:
@@ -440,7 +443,7 @@ class MpvMoviestim:
         format_name = (
             "<undetermined>"
             if "internal_format" not in psychopy_fbo_info
-            else pixel_format.get_internal_format_name(
+            else pixel_format.resolve_pixel_format_id_to_name(
                 psychopy_fbo_info["internal_format"]
             )
         )
@@ -583,14 +586,26 @@ class MpvMoviestim:
     def _allocate_intermediate_fbo(self) -> tuple[dict[str, int], int]:
         """Allocate one intermediate FBO + backing texture on the current GL context.
 
-        Must be called while the shadow (worker) context is current.
+        Notes
+        -----
+        The allocated resources are used as an intermediate buffer for rendering
+        MPV vframes into, before blitting to the PsychoPy window.
 
-        We only allocate intermediate FBOs/textures once at the start of the worker thread
-        to avoid doing any GL resource allocation during playback. The size of the FBO
-        is the larger of the window size and the media display size. During playback,
-        only resize operations to a size equal to or smaller than this are supported.
-        It is, therefore, recommended to initially set the display to the largest
-        expected size.
+        In order to avoid repeated resource allocations during playback, the
+        allocation is done once at the beginning, at the largest expected
+        display size. Resizing during playback is allowed, as long as the new
+        size is equal or smaller than the initially allocated size. For the MPV
+        rendering step, resizing only means that the FBO may not be fully used.
+
+        The largest expected size is determined as the larger one of the screen
+        size and the user-indicated display size, if any. Display sizes larger
+        than the screen can be useful to show an enlarged portion of the video,
+        and the keeping the screen size as a minimum allows the video to be
+        resized up to the screen size, to maintain some degree of flexibility.
+
+        In double-buffered (threaded) mode, the worker thread creates and owns
+        the allocated FBO and texture resources. The thread's GL context (shadow
+        context for the worker) must be active when this function is called.
 
         Returns
         -------
@@ -599,6 +614,7 @@ class MpvMoviestim:
         int
             texture id
         """
+        # calculate largest expected display size
         w = max(
             self._target_fbo_info["w"],
             self._draw_rect[2] if self._draw_rect is not None else 0,
@@ -607,11 +623,17 @@ class MpvMoviestim:
             self._target_fbo_info["h"],
             self._draw_rect[3] if self._draw_rect is not None else 0,
         )
+
+        # use Psychopy's pixel format or fallback to default if not available
         internal_format = self._target_fbo_info.get(
             "internal_format", pixel_format.default_pixel_format
         )
+
+        # create FBO and associated texture
         tex_id = utils.create_texture(w, h, internal_format)
         fbo_id = utils.create_fbo(tex_id)
+
+        # compile FBO info
         info: dict[str, int] = {
             "fbo": fbo_id,
             "w": w,
@@ -620,7 +642,7 @@ class MpvMoviestim:
         }
         logging.info(
             f"Intermediate FBO created: {info}; texture: {tex_id}; "
-            f"internal format: {pixel_format.get_internal_format_name(internal_format)}"
+            f"internal format: {pixel_format.resolve_pixel_format_id_to_name(internal_format)}"
         )
         return info, tex_id
 
@@ -631,39 +653,87 @@ class MpvMoviestim:
     def _mpv_update_callback(self) -> None:
         """Called by MPV when a new frame may be ready.
 
-        This function needs to be minimal so that it doesn't cause any
-        lag. If advanced control mode is enabled, MPV's update()
-        must be called back without delay otherwise it stalls MPV.
-        As per MPV API, render_ctx_update cannot be called from the
-        update_cb, and should be called from the render thread.
+        This function is only used in threaded mode. In direct rendering
+        mode, `draw()` calls MPV's update and render functions on each
+        iteration anyway, so this callback is not needed.
+
+        Notes
+        -----
+        - This function needs to be minimal to not cause any lag.
+        - If advanced control mode is enabled, MPV may call this callback
+        for various reasons, not just when a new vframe is available. In
+        any case, MPV's `render_ctx_update()` must be called immediately,
+        otherwise MPV's pipeline may be stalled.
+        - As per MPV API, `render_ctx_update` cannot be called from the
+        update callback (this function), and should be called from the
+        "render" thread, which in our case means the worker thread.
         """
+        assert self._threading_state is not None
         ts = self._threading_state
-        trigger_is_set = ts.wakeup_worker_trigger.is_set()
-        if not trigger_is_set:
+        worker_wakeup_already_triggered = ts.wakeup_worker_trigger.is_set()
+        if not worker_wakeup_already_triggered:
             ts.wakeup_worker_trigger.set()
 
     def _render_worker(self) -> None:
         """Worker thread: render new frames into intermediate buffers
 
-        Owns the shadow GL context and MPV render context.
         Responsible for drawing new frames into an intermediate FBO
 
-        Lifecycle
-        ---------
-        1. Make shadow context current (once, for the life of this thread).
-        2. Create ``MpvRenderContext`` with ``advanced_control=True``.
-        3. Create double-buffered intermediate FBOs.
-        4. Signal ``_worker_init_done`` to unblock the main thread.
-        5. Loop: wait for ``_render_trigger``, call ``ctx.update()`` / ``ctx.render()``.
-        6. On exit: free render context, destroy FBOs/textures, release context.
+        Notes
+        -----
+        Worker uses the shadow GL context, and owns the MPV render context and
+        the intermediate FBOs and textures.
+
+        Lifecycle:
+
+        - Init:
+          1. Make shadow OpenGL context current (once, for the life of this
+          thread).
+          2. Create `MpvRenderContext` using the shadow context.
+          3. Create double-buffered intermediate FBOs.
+          4. Signal `_worker_init_done` to unblock the main thread.
+
+        - Render loop:
+          1. Wake up on `_wakeup_worker_trigger` (set by MPV update callback).
+          2. Call `render_ctx_update()` to drain MPV updates and check for new
+          vframes.
+          3. Exit loop if `_stop_worker_event` is set.
+          4. If no new vframe is available, continue to wait for the next
+          update callback.
+          5. Set `_worker_is_rendering` to tell main thread that we're
+          rendering.
+          6. Acquire `buffer_fbo_lock` to get next FBO target, then release.
+          7. Render new vframe into the intermediate FBO.
+          8. Post a sync fence to GPU to ensure rendering finishes before FBO
+          is used.
+          9. With `buffer_fbo_lock`, request buffer flip and clear
+          `_worker_is_rendering`.
+          10. Signal `_worker_render_done`.
+
+        - Cleanup:
+          Free render context, destroy FBOs/textures, release context.
+
+        Synchronisation:
+        - Each worker iteration is triggered when `_wakeup_worker_trigger` is
+        set by the MPV update callback, cleared here.
+        - `buffer_fbo_lock` protects changes to intermediate FBO indices, the
+        `_worker_is_rendering` flag, and the `_buffer_flip_required` flag.
+        - `_worker_is_rendering` and the `_worker_render_done` event are used
+        to signal the main thread that a render is in progress. Main can decide
+        to wait for the render to finish, to display the newest video frame
+        available.
+        - `_buffer_flip_requred` is set by the worker to indicate that a new
+        video frame was rendered to the intermediate FBO. Buffer indices are
+        then flipped by the main thread.
         """
+        assert self._threading_state is not None
         ts = self._threading_state
 
         # --- one-time init on this thread ---
         if ts.shadow_window is None:
             raise RuntimeError("shadow_window must be set before the worker starts")
         utils.make_context_current(ts.shadow_window)
-        # ts.shadow_window.switch_to()
+        # same as ts.shadow_window.switch_to()
 
         # Log which renderer this context sees (sanity check that sharing works).
         renderer = gl.glGetString(gl.GL_RENDERER)

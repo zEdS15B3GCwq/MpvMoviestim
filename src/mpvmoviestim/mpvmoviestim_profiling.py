@@ -441,7 +441,7 @@ class MpvMoviestim:
             format_name = (
                 "<undetermined>"
                 if "internal_format" not in inferred_fbo_info
-                else pixel_format.get_internal_format_name(
+                else pixel_format.resolve_pixel_format_id_to_name(
                     inferred_fbo_info["internal_format"]
                 )
             )
@@ -626,7 +626,7 @@ class MpvMoviestim:
         }
         logging.info(
             f"Intermediate FBO created: {info}; texture: {tex_id}; "
-            f"internal format: {pixel_format.get_internal_format_name(internal_format)}"
+            f"internal format: {pixel_format.resolve_pixel_format_id_to_name(internal_format)}"
         )
         return info, tex_id
 

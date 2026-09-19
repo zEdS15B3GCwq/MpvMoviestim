@@ -23,7 +23,7 @@
 ### MPV
 
 - \_player
-- _mpv_render_ctx _ \_mpv_lib
+- \_mpv_render_ctx, \_mpv_lib
 - \_mpv_options
 
 ### Psychopy
@@ -37,7 +37,7 @@ Basically everything in `ThreadingState`
 
 - worker_thread
 - shadow_window
-- intermediate*fbo*\*
+- intermediate_fbo\_\*
 - \*\_fbo_idx
 - events: stop_worker, wakeup_worker, worker_init_done, worker_render_done
 - sync flags: worker_is_rendering, buffer_flip_required
@@ -45,3 +45,7 @@ Basically everything in `ThreadingState`
 - sync fences: render_fences, blit_fences
 
 - MpvMoviestim.\_threading_state
+
+# Threaded workflow
+
+-

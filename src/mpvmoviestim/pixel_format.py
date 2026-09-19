@@ -10,7 +10,7 @@ if TYPE_CHECKING:
 
 default_pixel_format = int(getattr(gl, "GL_RGB16F", 0x881B))
 
-_INTERNAL_FORMAT_MAP: dict[int, str] = {
+_PIXEL_FORMAT_ID_TO_NAME_MAP: dict[int, str] = {
     int(getattr(gl, "GL_RGBA32F", 0x8814)): "rgba32f",
     int(getattr(gl, "GL_RGB32F", 0x8815)): "rgb32f",
     int(getattr(gl, "GL_RGBA16F", 0x881A)): "rgba16f",
@@ -24,7 +24,7 @@ _INTERNAL_FORMAT_MAP: dict[int, str] = {
 }
 
 
-def _infer_backbuffer_format(red: int, green: int, blue: int, alpha: int) -> int:  # noqa: PLR0911
+def _infer_pixel_format_from_bpc(red: int, green: int, blue: int, alpha: int) -> int:  # noqa: PLR0911
     match (red, green, blue, alpha):
         case (8, 8, 8, 8):
             return int(getattr(gl, "GL_RGBA8", 0x8058))
@@ -42,8 +42,8 @@ def _infer_backbuffer_format(red: int, green: int, blue: int, alpha: int) -> int
             return 0
 
 
-def get_internal_format_name(format_id: int) -> str:
-    return _INTERNAL_FORMAT_MAP.get(format_id, "")
+def resolve_pixel_format_id_to_name(format_id: int) -> str:
+    return _PIXEL_FORMAT_ID_TO_NAME_MAP.get(format_id, "")
 
 
 def get_psychopy_fbo_info(
@@ -106,14 +106,6 @@ def get_psychopy_fbo_info(
         gl.glBindTexture(gl.GL_TEXTURE_2D, saved_texture)
 
         internal_fmt = internal_format_value.value
-
-        # if format_name != "rgba32f":
-        #     logging.info(
-        #         "PsychoPy intermediate FBO texture format is "
-        #         f"{format_name if format_name else str(hex(internal_fmt))} "
-        #         "(expected rgba32f)."
-        #     )
-
         target_fbo: int = win.frameBuffer.value
 
     else:
@@ -128,14 +120,9 @@ def get_psychopy_fbo_info(
         if bpc is not None:
             print(f"Psychopy window reports {bpc} bits per channel (win.bpc).")
 
-        internal_fmt = _infer_backbuffer_format(
+        internal_fmt = _infer_pixel_format_from_bpc(
             red_bits, green_bits, blue_bits, alpha_bits
         )
-        # logging.info(
-        #     "Psychopy window's backbuffer channel bits are "
-        #     f"({red_bits}, {green_bits}, {blue_bits}, {alpha_bits}); "
-        #     f"chosen format: {format_name if format_name else '<default>'}."
-        # )
 
     w, h = win.frameBufferSize
     fbo_info: dict[str, int] = {
