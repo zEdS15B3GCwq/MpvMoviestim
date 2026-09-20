@@ -128,7 +128,7 @@ def _log_pre_post(func: Callable[P, R]) -> Callable[P, R]:
 def _state_guard(
     allowed_state: MpvMoviestimState | list[MpvMoviestimState] | None = None,
     forbidden_state: MpvMoviestimState | list[MpvMoviestimState] | None = None,
-) -> Callable[[Callable[..., None]], Callable[..., None]]:
+) -> Callable[[Callable[..., R]], Callable[..., R]]:
     """Decorator to enforce allowed and forbidden states when running methods."""
 
     allowed_states = (
@@ -147,30 +147,32 @@ def _state_guard(
         else forbidden_state
     )
 
-    def decorator(func: Callable[..., None]) -> Callable[..., None]:
+    def decorator(func: Callable[..., R]) -> Callable[..., R]:
 
         @functools.wraps(func)
-        def wrapper(*args: Any, **kwargs: Any) -> None:
+        def wrapper(*args: Any, **kwargs: Any) -> R:
             instance: MpvMoviestim = args[0]
             actual_state = instance._state  # pylint: disable=protected-access
 
             if allowed_states is not None and actual_state not in allowed_states:
-                logging.warning(
+                msg = (
                     f"'{func.__name__}' failed: state must be one of "  # ty: ignore
                     f"[{','.join([s.name for s in allowed_states])}], "
                     f"got {actual_state.name}"
                 )
-                return
+                logging.error(msg)
+                raise RuntimeError(msg)
 
             if forbidden_states is not None and actual_state in forbidden_states:
-                logging.warning(
+                msg = (
                     f"'{func.__name__}' failed: state must not be one of "  # ty: ignore
                     f"[{','.join([s.name for s in forbidden_states])}], "
                     f"got {actual_state.name}"
                 )
-                return
+                logging.error(msg)
+                raise RuntimeError(msg)
 
-            func(*args, **kwargs)
+            return func(*args, **kwargs)
 
         return wrapper
 
@@ -396,18 +398,21 @@ class MpvMoviestim:
         # infer FBO information (size, pixel format) for the PsychoPy window
         # Resizing controls for the PP window are disabled so target FBO size
         # won't change during playback.
-        self._init_target_fbo()
+        self._target_fbo_info = self._infer_target_fbo_info()
         # TODO: if target FBO is set here, what happens if the window is resized?
 
         # initialise MPV core
+        # fills in: _mpb_lib, _player, _c_getproc
         self._init_mpv_player()
 
-        self._state = MpvMoviestimState.NO_MEDIA
-
-        # Enable threaded, double-buffered mode
-        # synchronisation primitives must exist before worker thread starts
+        # initialise threading mode
+        # threading mode is indicated by self._threading_state not being None
+        # fills in: _threading_state, _mpv_render_ctx,
         if double_buffering:
-            self._threading_state = ThreadingState()
+            self._init_threading()
+
+        # initialisation done, set state to NO_MEDIA
+        self._state = MpvMoviestimState.NO_MEDIA
 
         # load movie if specified
         if file is not None:
@@ -431,7 +436,7 @@ class MpvMoviestim:
 
     @_log_pre_post
     @_state_guard(allowed_state=MpvMoviestimState.UNSPECIFIED)
-    def _init_target_fbo(self) -> None:
+    def _infer_target_fbo_info(self) -> dict[str, int]:
         # infer the target FBO information (size, pixel format) for the PsychoPy window
         # must happen while the main window's context is current
         assert self._window.winHandle is not None
@@ -451,35 +456,37 @@ class MpvMoviestim:
             f"size={psychopy_fbo_info['w']}x{psychopy_fbo_info['h']}, "
             f"format={format_name}"
         )
-        self._target_fbo_info = psychopy_fbo_info
+        return psychopy_fbo_info
 
     @_log_pre_post
     @_state_guard(allowed_state=MpvMoviestimState.UNSPECIFIED)
     def _init_threading(self) -> None:
-        pass
-        # # Create the shadow window (shared context) on the main thread so
-        # # that its DC/surface is set up before the worker uses it.
-        # # Pass winHandle (the underlying pyglet window) so utils.py does not
-        # # depend on PsychoPy.
-        # logging.info("Creating shadow window for context sharing.")
-        # self._threading_state.shadow_window = utils.create_shadow_window(pyglet_window)
+        self._threading_state = ThreadingState()
 
-        # # Start worker — it takes the shadow context, creates the render
-        # # context and the double-buffered intermediate FBOs, then signals
-        # # worker_init_done.
-        # logging.info("Instantiating and starting renderer worker thread.")
-        # self._threading_state.worker_thread = threading.Thread(
-        #     target=self._render_worker, name="mpv-render-worker", daemon=True
-        # )
-        # self._threading_state.worker_thread.start()
-        # logging.info("Waiting for worker thread to initialise.")
-        # if not self._threading_state.worker_init_done.wait(timeout=TIMEOUT_DEFAULT_S):
-        #     raise TimeoutError(
-        #         "Timed out waiting for render worker thread to initialise."
-        #     )
-        # logging.info("Finished waiting for worker thread.")
-        # # set IDLE state, meaning core is active, file not loaded
-        # self._state = MpvMoviestimState.NO_MEDIA
+        # Create the shadow window (shared context) on the main thread so
+        # that its DC/surface is set up before the worker uses it.
+        # Pass winHandle (the underlying pyglet window) so utils.py does not
+        # depend on PsychoPy.
+        logging.info("Creating shadow window for context sharing.")
+        assert self._window.winHandle is not None
+        pyglet_window: BaseWindow = self._window.winHandle
+        self._threading_state.shadow_window = utils.create_shadow_window(pyglet_window)
+
+        # Start worker — it takes the shadow context, creates the render
+        # context and the double-buffered intermediate FBOs, then signals
+        # worker_init_done.
+        logging.info("Instantiating and starting renderer worker thread.")
+        self._threading_state.worker_thread = threading.Thread(
+            target=self._render_worker, name="mpv-render-worker", daemon=True
+        )
+        self._threading_state.worker_thread.start()
+
+        logging.info("Waiting for worker thread to initialise.")
+        if not self._threading_state.worker_init_done.wait(timeout=TIMEOUT_DEFAULT_S):
+            raise TimeoutError(
+                "Timed out waiting for render worker thread to initialise."
+            )
+        logging.info("Finished waiting for worker thread.")
 
     @staticmethod
     def _bounding_rect(
