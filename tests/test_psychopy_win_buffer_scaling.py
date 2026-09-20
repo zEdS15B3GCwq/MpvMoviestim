@@ -1,4 +1,15 @@
-from pathlib import Path
+# Results:
+# * Without setting DPI awareness, the reported window size, FBO size and content
+#   scale factor are unaware of Windows scaling. At 1.25 scaling, the content scale
+#   factor was 1.0 and the window size was 1.25 larger without PP being aware of it.
+#   Windows reported a 96x96 dpi.
+# * With awareness set to -2, PP reported the exact same data, but the window size
+#   was not scaled (2500x1600 was actually that size), and Windows reported a
+#   DPI of 144x144 on one PC, 120x120 on another.
+#   => PP window data cannot be used reliably to detect scaling.
+# * The screen backbuffer's pixel format was RGB8; with useFBO, the FBO's
+#   pixel format was RGBA32F.
+
 from time import sleep
 
 from psychopy import logging, visual
@@ -9,7 +20,7 @@ from mpvmoviestim.pixel_format import (
 )
 from mpvmoviestim.utils import windows_get_screen_dpi, windows_set_process_dpi_awareness
 
-WIN_SIZE = (2560, 1600)
+WIN_SIZE = (2500, 1600)
 WAIT_BLANK = True  # wait for blank after flip
 # TODO: try setting wait for blank to False for report_swap()
 
@@ -25,7 +36,7 @@ def init_pp(set_dpi_aware: bool = True) -> visual.Window:
     win = visual.Window(
         size=list(WIN_SIZE),
         fullscr=False,
-        useFBO=False,  # test both
+        useFBO=True,  # test both
         waitBlanking=WAIT_BLANK,
         units="norm",
         color=(-1, -1, -1),  # black background

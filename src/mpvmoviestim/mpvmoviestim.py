@@ -324,7 +324,7 @@ class MpvMoviestim:
     _target_fbo_info: dict[str, int]  # mpv.MpvOpenGLFBO
     # TODO: _advanced_control: bool
 
-    def __init__(  # noqa: PLR0913
+    def __init__(
         self,
         window: visual.Window,
         file: Path | str | None,
