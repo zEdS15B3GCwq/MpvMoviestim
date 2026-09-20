@@ -65,12 +65,11 @@ from types import ModuleType
 from typing import TYPE_CHECKING, ParamSpec, TypeVar, cast
 
 import pyglet
-from numexpr.necompiler import double
 from psychopy import logging, visual
 from psychopy.tools.monitorunittools import convertToPix
 from pyglet import gl
 
-from . import pixel_format, utils
+from . import utils
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -439,11 +438,11 @@ class MpvMoviestim:
         pyglet_window: BaseWindow = self._window.winHandle
         pyglet_window.switch_to()
         pyglet_window.activate()
-        psychopy_fbo_info = pixel_format.get_psychopy_fbo_info(self._window)
+        psychopy_fbo_info = utils.get_psychopy_fbo_info(self._window)
         format_name = (
             "<undetermined>"
             if "internal_format" not in psychopy_fbo_info
-            else pixel_format.resolve_pixel_format_id_to_name(
+            else utils.resolve_pixel_format_id_to_name(
                 psychopy_fbo_info["internal_format"]
             )
         )
@@ -626,7 +625,7 @@ class MpvMoviestim:
 
         # use Psychopy's pixel format or fallback to default if not available
         internal_format = self._target_fbo_info.get(
-            "internal_format", pixel_format.default_pixel_format
+            "internal_format", utils.default_pixel_format
         )
 
         # create FBO and associated texture
@@ -642,7 +641,7 @@ class MpvMoviestim:
         }
         logging.info(
             f"Intermediate FBO created: {info}; texture: {tex_id}; "
-            f"internal format: {pixel_format.resolve_pixel_format_id_to_name(internal_format)}"
+            f"internal format: {utils.resolve_pixel_format_id_to_name(internal_format)}"
         )
         return info, tex_id
 

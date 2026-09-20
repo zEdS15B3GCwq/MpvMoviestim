@@ -15,7 +15,10 @@ if TYPE_CHECKING:
     from typing import Any
 
     from mpv import MpvRenderContext
+    from psychopy import visual
     from pyglet.window import BaseWindow
+
+default_pixel_format = int(getattr(gl, "GL_RGB16F", 0x881B))
 
 
 _PIXEL_FORMAT_MAP: dict[int, tuple[int, int, str]] = {
@@ -38,6 +41,119 @@ _PIXEL_FORMAT_MAP: dict[int, tuple[int, int, str]] = {
     int(getattr(gl, "GL_RGBA16", 0x805B)): (gl.GL_RGBA, gl.GL_UNSIGNED_SHORT, "RGBA16"),
     int(getattr(gl, "GL_RGB16", 0x8054)): (gl.GL_RGB, gl.GL_UNSIGNED_SHORT, "RGB16"),
 }
+
+
+def _infer_pixel_format_from_bpc(red: int, green: int, blue: int, alpha: int) -> int:  # noqa: PLR0911
+    match (red, green, blue, alpha):
+        case (8, 8, 8, 8):
+            return int(getattr(gl, "GL_RGBA8", 0x8058))
+        case (8, 8, 8, 0):
+            return int(getattr(gl, "GL_RGB8", 0x8051))
+        case (10, 10, 10, 2):
+            return int(getattr(gl, "GL_RGB10_A2", 0x8059))
+        case (10, 10, 10, 0):
+            return int(getattr(gl, "GL_RGB10", 0x8052))
+        case (16, 16, 16, 16):
+            return int(getattr(gl, "GL_RGBA16", 0x805B))
+        case (16, 16, 16, 0):
+            return int(getattr(gl, "GL_RGB16", 0x8054))
+        case _:
+            return 0
+
+
+def resolve_pixel_format_id_to_name(format_id: int) -> str:
+    f = _PIXEL_FORMAT_MAP.get(format_id, None)
+    return f[2] if f is not None else ""
+
+
+def get_psychopy_fbo_info(
+    win: visual.Window,
+) -> dict[str, int]:
+    """Return FBO information for a PsychoPy/Pyglet window.
+
+    Psychopy's window may use the backbuffer directly, or an intermediate FBO
+    (if `useFBO=True`). This function determines the FBO's id, width, height,
+    and its internal pixel format if possible.
+
+    Parameters
+    ----------
+    win: psychopy.visual.Window
+        Psychopy's window (pyglet-based).
+
+    Returns
+    -------
+    dict[str, Any] (with elements corresponding to mpv.MpvOpenGLFBO)
+        fbo: int
+            Psychopy's render FBO, or 0 when the window backbuffer is the target.
+        w: int
+            Width of the target buffer
+        h: int
+            Height of the target buffer
+        internal_format: int
+            OpenGL number of the best matching format.
+            This field is only present if a best format can be determined.
+    str
+        Best-match format string (for example `rgba32f`), or empty string
+        if undetermined.
+
+    Notes
+    -----
+    The OpenGL context of the provided window is assumed to be current.
+    """
+
+    def _get_gl_int(pname: int) -> int:
+        """Return the value of a named GL integer."""
+        out = ctypes.c_int(0)
+        gl.glGetIntegerv(pname, out)
+        return out.value
+
+    if win.useFBO:
+        tex_id: int = win.frameTexture
+
+        # bind the window's texture
+        saved_texture = _get_gl_int(int(gl.GL_TEXTURE_BINDING_2D))
+        gl.glBindTexture(gl.GL_TEXTURE_2D, tex_id)
+
+        internal_format_value = ctypes.c_int(0)
+        gl.glGetTexLevelParameteriv(
+            gl.GL_TEXTURE_2D,
+            0,
+            int(gl.GL_TEXTURE_INTERNAL_FORMAT),
+            internal_format_value,
+        )
+
+        # restore the previous texture binding
+        gl.glBindTexture(gl.GL_TEXTURE_2D, saved_texture)
+
+        internal_fmt = internal_format_value.value
+        target_fbo: int = win.frameBuffer.value
+
+    else:
+        target_fbo = 0
+
+        red_bits = _get_gl_int(int(gl.GL_RED_BITS))
+        green_bits = _get_gl_int(int(gl.GL_GREEN_BITS))
+        blue_bits = _get_gl_int(int(gl.GL_BLUE_BITS))
+        alpha_bits = _get_gl_int(int(gl.GL_ALPHA_BITS))
+
+        # bpc = getattr(win, "bpc", None)
+        # if bpc is not None:
+        #     print(f"Psychopy window reports {bpc} bits per channel (win.bpc).")
+
+        internal_fmt = _infer_pixel_format_from_bpc(
+            red_bits, green_bits, blue_bits, alpha_bits
+        )
+
+    w, h = win.frameBufferSize
+    fbo_info: dict[str, int] = {
+        "w": w,
+        "h": h,
+        "fbo": target_fbo,
+    }
+    if internal_fmt != 0:
+        fbo_info["internal_format"] = internal_fmt
+
+    return fbo_info
 
 
 def _resolve_gl_proc_with_pyglet(name: bytes) -> int:
