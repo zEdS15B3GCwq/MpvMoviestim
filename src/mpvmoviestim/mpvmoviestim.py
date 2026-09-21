@@ -447,7 +447,7 @@ class MpvMoviestim:
         format_name = (
             "<undetermined>"
             if "internal_format" not in psychopy_fbo_info
-            else utils.resolve_pixel_format_id_to_name(
+            else utils.pixel_format_id_to_name(
                 psychopy_fbo_info["internal_format"]
             )
         )
@@ -636,8 +636,8 @@ class MpvMoviestim:
         )
 
         # create FBO and associated texture
-        tex_id = utils.create_texture(w, h, internal_format)
-        fbo_id = utils.create_fbo(tex_id)
+        tex_id = utils.create_gl_texture(w, h, internal_format)
+        fbo_id = utils.create_gl_fbo(tex_id)
 
         # compile FBO info
         info: dict[str, int] = {
@@ -648,7 +648,7 @@ class MpvMoviestim:
         }
         logging.info(
             f"Intermediate FBO created: {info}; texture: {tex_id}; "
-            f"internal format: {utils.resolve_pixel_format_id_to_name(internal_format)}"
+            f"internal format: {utils.pixel_format_id_to_name(internal_format)}"
         )
         return info, tex_id
 
@@ -738,7 +738,7 @@ class MpvMoviestim:
         # --- one-time init on this thread ---
         if ts.shadow_window is None:
             raise RuntimeError("shadow_window must be set before the worker starts")
-        utils.make_context_current(ts.shadow_window)
+        utils.make_gl_context_current(ts.shadow_window)
         # same as ts.shadow_window.switch_to()
 
         # Log which renderer this context sees (sanity check that sharing works).
@@ -835,11 +835,11 @@ class MpvMoviestim:
         self._mpv_render_ctx.free()
         if ts.intermediate_fbo_textures is not None:
             for tex in ts.intermediate_fbo_textures:
-                utils.destroy_texture(tex)
+                utils.destroy_gl_texture(tex)
         if ts.intermediate_fbo_infos is not None:
             for fbo in ts.intermediate_fbo_infos:
                 utils.destroy_fbo(fbo["fbo"])
-        utils.release_context()
+        utils.release_gl_context()
 
     def _mpv_log_fn(self, level: int, prefix: str, text: str) -> None:
         # print(f"MPV: {level=}, {prefix=}, {text=}")

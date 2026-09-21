@@ -14,11 +14,12 @@ from time import sleep
 
 from psychopy import logging, visual
 
-from mpvmoviestim.pixel_format import (
+from mpvmoviestim.utils import (
     get_psychopy_fbo_info,
-    resolve_pixel_format_id_to_name,
+    pixel_format_id_to_name,
+    windows_get_screen_dpi,
+    windows_set_process_dpi_awareness,
 )
-from mpvmoviestim.utils import windows_get_screen_dpi, windows_set_process_dpi_awareness
 
 WIN_SIZE = (2500, 1600)
 WAIT_BLANK = True  # wait for blank after flip
@@ -61,7 +62,7 @@ def main() -> None:
     fbo_info = get_psychopy_fbo_info(win)
     print(f"FBO info: {fbo_info}")
     print(
-        f"Pixel format: {resolve_pixel_format_id_to_name(fbo_info.get('internal_format', 0))}"
+        f"Pixel format: {pixel_format_id_to_name(fbo_info.get('internal_format', 0))}"
     )
 
     win.close()
@@ -78,7 +79,7 @@ def main() -> None:
     fbo_info = get_psychopy_fbo_info(win)
     print(f"FBO info: {fbo_info}")
     print(
-        f"Pixel format: {resolve_pixel_format_id_to_name(fbo_info.get('internal_format', 0))}"
+        f"Pixel format: {pixel_format_id_to_name(fbo_info.get('internal_format', 0))}"
     )
     win.close()
 
