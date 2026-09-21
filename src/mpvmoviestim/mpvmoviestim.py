@@ -447,9 +447,7 @@ class MpvMoviestim:
         format_name = (
             "<undetermined>"
             if "internal_format" not in psychopy_fbo_info
-            else utils.pixel_format_id_to_name(
-                psychopy_fbo_info["internal_format"]
-            )
+            else utils.pixel_format_id_to_name(psychopy_fbo_info["internal_format"])
         )
         logging.info(
             f"Psychopy's rendering FBO: fbo={psychopy_fbo_info['fbo']}, "
@@ -632,7 +630,7 @@ class MpvMoviestim:
 
         # use Psychopy's pixel format or fallback to default if not available
         internal_format = self._target_fbo_info.get(
-            "internal_format", utils.default_pixel_format
+            "internal_format", gl.GL_RGB32F if self._window.useFBO else gl.GL_RGB8
         )
 
         # create FBO and associated texture
