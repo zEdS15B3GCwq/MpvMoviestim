@@ -243,7 +243,7 @@ def _resolve_gl_proc_with_pyglet(name: bytes) -> int:
     return 0
 
 
-def get_proc_address(_ctx: MpvRenderContext, name: bytes) -> int:
+def get_gl_proc_address(_ctx: MpvRenderContext, name: bytes) -> int:
     """Return GL function address, or 0 if not available or on error.
 
     Parameters
@@ -265,7 +265,7 @@ def get_proc_address(_ctx: MpvRenderContext, name: bytes) -> int:
         return 0
 
 
-def create_gl_texture(w: int, h: int, internal_format: int = gl.GL_RGBA8) -> int:
+def gl_texture_create(w: int, h: int, internal_format: int = gl.GL_RGBA8) -> int:
     """Create a texture.
 
     Parameters
@@ -329,7 +329,7 @@ def create_gl_texture(w: int, h: int, internal_format: int = gl.GL_RGBA8) -> int
     return tex_id
 
 
-def destroy_gl_texture(tex_id: int) -> None:
+def gl_texture_destroy(tex_id: int) -> None:
     """Destroy a texture.
 
     Parameters
@@ -342,7 +342,7 @@ def destroy_gl_texture(tex_id: int) -> None:
         gl.glDeleteTextures(1, ctypes.byref(t))
 
 
-def create_gl_fbo(tex_id: int) -> int:
+def gl_fbo_create(tex_id: int) -> int:
     """Create a framebuffer object (FBO) for the supplied texture.
 
     Parameters
@@ -377,7 +377,7 @@ def create_gl_fbo(tex_id: int) -> int:
     return fbo_id
 
 
-def destroy_gl_fbo(fbo_id: int) -> None:
+def gl_fbo_destroy(fbo_id: int) -> None:
     """Destroy a framebuffer object (FBO).
 
     Parameters
@@ -390,7 +390,7 @@ def destroy_gl_fbo(fbo_id: int) -> None:
         gl.glDeleteFramebuffers(1, ctypes.byref(f))
 
 
-def blit_with_draw_rect(
+def gl_blit_with_draw_rect(
     draw_rect: tuple[int, int, int, int],
     src_fbo: int,
     draw_fbo: int,

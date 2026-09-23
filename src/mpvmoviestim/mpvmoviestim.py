@@ -432,7 +432,7 @@ class MpvMoviestim:
         self._player.observe_property("eof-reached", self._on_eof)
 
         # find the OpenGl proc-address resolver
-        self._c_getproc = self._mpv_lib.MpvGlGetProcAddressFn(utils.get_proc_address)
+        self._c_getproc = self._mpv_lib.MpvGlGetProcAddressFn(utils.get_gl_proc_address)
 
     @_log_pre_post
     @_state_guard(allowed_state=MpvMoviestimState.UNSPECIFIED)
@@ -634,8 +634,8 @@ class MpvMoviestim:
         )
 
         # create FBO and associated texture
-        tex_id = utils.create_gl_texture(w, h, internal_format)
-        fbo_id = utils.create_gl_fbo(tex_id)
+        tex_id = utils.gl_texture_create(w, h, internal_format)
+        fbo_id = utils.gl_fbo_create(tex_id)
 
         # compile FBO info
         info: dict[str, int] = {
@@ -833,10 +833,10 @@ class MpvMoviestim:
         self._mpv_render_ctx.free()
         if ts.intermediate_fbo_textures is not None:
             for tex in ts.intermediate_fbo_textures:
-                utils.destroy_gl_texture(tex)
+                utils.gl_texture_destroy(tex)
         if ts.intermediate_fbo_infos is not None:
             for fbo in ts.intermediate_fbo_infos:
-                utils.destroy_fbo(fbo["fbo"])
+                utils.gl_fbo_destroy(fbo["fbo"])
         utils.release_gl_context()
 
     def _mpv_log_fn(self, level: int, prefix: str, text: str) -> None:
@@ -1120,7 +1120,7 @@ class MpvMoviestim:
             ts.render_fences[present_idx] = None
 
         # Blit intermediate FBO → PsychoPy's target FBO.
-        utils.blit_with_draw_rect(
+        utils.gl_blit_with_draw_rect(
             self._draw_rect,
             fbo_info["fbo"],
             self._target_fbo_info["fbo"],
