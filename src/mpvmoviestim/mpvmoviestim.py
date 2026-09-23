@@ -343,32 +343,8 @@ class MpvMoviestim:
         # TODO: advanced_control: bool = True,
         # TODO: verify audio/display-vdrop modes
     ):
-        # **************
-        # Configure MPV
-        # **************
-        # start from default options
-        self._mpv_options = _mpv_default_options.copy()
-        # add log handler
-        self._mpv_options.update({"log_handler": self._mpv_log_fn, "loglevel": "info"})
-        # add audio options
-        if no_audio:
-            self._mpv_options["ao"] = "null"
-        else:
-            self._mpv_options.update(_mpv_default_audio_options)
-            self._mpv_options["volume"] = (
-                0 if volume < 0 else 100 if volume > 1 else int(volume * 100)
-            )
-        # if monitor fps is provided, try display-vdrop video sync mode
-        # user can get fps with: window.getActualFrameRate()
-        if monitor_framerate is not None:
-            self._monitor_framerate = monitor_framerate
-            self._mpv_options["video-sync"] = "display-vdrop"
-        else:
-            self._monitor_framerate = None
-            self._mpv_options["video-sync"] = "audio"
-        # apply user-specified MPV options
-        if mpv_options is not None:
-            self._mpv_options.update(mpv_options)
+        # unspecified - not initialized or unknown state
+        self._state = MpvMoviestimState.UNSPECIFIED
 
         # **************
         # Psychopy and display-related configuration
@@ -382,28 +358,47 @@ class MpvMoviestim:
         self._media_size = None
 
         # **************
-        # Internal state
+        # Configure MPV
         # **************
+        # TODO: advanced control?
+        # start from default options
+        user_mpv_options = mpv_options
+        mpv_options = _mpv_default_options.copy()
+        # add log handler
+        mpv_options.update({"log_handler": self._mpv_log_fn, "loglevel": "info"})
+        # add audio options
+        if no_audio:
+            mpv_options["ao"] = "null"
+        else:
+            mpv_options.update(_mpv_default_audio_options)
+            mpv_options["volume"] = (
+                0 if volume < 0 else 100 if volume > 1 else int(volume * 100)
+            )
+        # if monitor fps is provided, try display-vdrop video sync mode
+        # user can get fps with: window.getActualFrameRate()
+        if monitor_framerate is not None:
+            mpv_options["display-fps-override"] = monitor_framerate
+            mpv_options["video-sync"] = "display-vdrop"
+        else:
+            mpv_options["video-sync"] = "audio"
+        # apply user-specified MPV options
+        if user_mpv_options is not None:
+            mpv_options.update(user_mpv_options)
 
-        # unspecified - not initialized or unknown state
-        self._state = MpvMoviestimState.UNSPECIFIED
+        # initialise MPV core
+        # fills in: _mpb_lib, _player, _c_getproc
+        # TODO: make these init functions side effect-less
+        self._init_mpv_player(mpv_options)
 
-        # self._advanced_control = advanced_control
-
-        # self._draw_rect = self._bounding_rect(size, None, pos, window)
-        # logging.info(f"setting draw rect to: {self._draw_rect}")
-
-        # self._report_swap = False
+        # ******
+        # Others
+        # ******
 
         # infer FBO information (size, pixel format) for the PsychoPy window
         # Resizing controls for the PP window are disabled so target FBO size
         # won't change during playback.
         self._target_fbo_info = self._infer_target_fbo_info()
-        # TODO: if target FBO is set here, what happens if the window is resized?
-
-        # initialise MPV core
-        # fills in: _mpb_lib, _player, _c_getproc
-        self._init_mpv_player()
+        # TODO: add to docs that resizing of the PP window isn't supported
 
         # initialise threading mode
         # threading mode is indicated by self._threading_state not being None
@@ -420,13 +415,13 @@ class MpvMoviestim:
 
     @_log_pre_post
     @_state_guard(allowed_state=MpvMoviestimState.UNSPECIFIED)
-    def _init_mpv_player(self) -> None:
-        """Initialise the MPV player core and OpenGL render context."""
+    def _init_mpv_player(self, mpv_options: dict[str, Any]) -> None:
+        """Initialise the MPV player core."""
         # lazy load MPV
         self._mpv_lib = importlib.import_module("mpv")
 
         # create MPV player
-        self._player = self._mpv_lib.MPV(**self._mpv_options)
+        self._player = self._mpv_lib.MPV(**mpv_options)
 
         # set EOF callback
         self._player.observe_property("eof-reached", self._on_eof)
