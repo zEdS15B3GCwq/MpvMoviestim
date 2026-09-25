@@ -214,7 +214,7 @@ class MpvMoviestimState(Enum):
 
 
 @dataclasses.dataclass
-class ThreadingState:
+class SharedThreadedState:
     """Synchronisation primitives and core objects related to the rendering worker thread.
 
     - The worker thread is responsible for rendering MPV vframes into intermediate FBOs.
@@ -230,7 +230,7 @@ class ThreadingState:
     ----------
     worker_thread : threading.Thread | None
         The thread object for the rendering worker.
-    shadow_window : BaseWindow | None
+    shadow_window : BaseWindow
         The shadow window that provides the GL context for the worker thread.
     intermediate_fbo_infos : tuple[dict[str, int], dict[str, int]] | None
         The double-buffered intermediate FBOs used for rendering frames in the worker thread.
@@ -269,8 +269,8 @@ class ThreadingState:
     """
 
     # Core objects
-    worker_thread: threading.Thread | None = None
-    shadow_window: BaseWindow | None = None
+    worker_thread: threading.Thread
+    shadow_window: BaseWindow
 
     # Double buffering
     intermediate_fbo_infos: tuple[dict[str, int], dict[str, int]] | None = None
@@ -314,7 +314,7 @@ class MpvMoviestim:
     _draw_rect: tuple[int, int, int, int] | None  # display rect pix (x, y, w, h)
     # Core
     _state: MpvMoviestimState
-    _threading_state: ThreadingState | None
+    _thread_state: SharedThreadedState | None
     _double_buffering: bool
     # MPV and OpenGL
     _mpv_lib: ModuleType
@@ -346,9 +346,9 @@ class MpvMoviestim:
         # unspecified - not initialized or unknown state
         self._state = MpvMoviestimState.UNSPECIFIED
 
-        # **************
+        # ******************************************
         # Psychopy and display-related configuration
-        # **************
+        # ******************************************
         self._window = window
         self._size = size
         self._position = pos
@@ -357,56 +357,83 @@ class MpvMoviestim:
         self.flip_vertical = flip_vert
         self._media_size = None
 
-        # **************
-        # Configure MPV
-        # **************
-        # TODO: advanced control?
-        # start from default options
-        user_mpv_options = mpv_options
-        mpv_options = _mpv_default_options.copy()
-        # add log handler
-        mpv_options.update({"log_handler": self._mpv_log_fn, "loglevel": "info"})
-        # add audio options
-        if no_audio:
-            mpv_options["ao"] = "null"
-        else:
-            mpv_options.update(_mpv_default_audio_options)
-            mpv_options["volume"] = (
-                0 if volume < 0 else 100 if volume > 1 else int(volume * 100)
-            )
-        # if monitor fps is provided, try display-vdrop video sync mode
-        # user can get fps with: window.getActualFrameRate()
-        if monitor_framerate is not None:
-            mpv_options["display-fps-override"] = monitor_framerate
-            mpv_options["video-sync"] = "display-vdrop"
-        else:
-            mpv_options["video-sync"] = "audio"
-        # apply user-specified MPV options
-        if user_mpv_options is not None:
-            mpv_options.update(user_mpv_options)
-
-        # initialise MPV core
-        # fills in: _mpb_lib, _player, _c_getproc
-        # TODO: make these init functions side effect-less
-        self._init_mpv_player(mpv_options)
-
-        # ******
-        # Others
-        # ******
-
         # infer FBO information (size, pixel format) for the PsychoPy window
         # Resizing controls for the PP window are disabled so target FBO size
         # won't change during playback.
         self._target_fbo_info = self._infer_target_fbo_info()
         # TODO: add to docs that resizing of the PP window isn't supported
 
-        # initialise threading mode
-        # threading mode is indicated by self._threading_state not being None
-        # fills in: _threading_state, _mpv_render_ctx,
-        if double_buffering:
-            self._init_threading()
+        # **************
+        # Configure MPV
+        # **************
+        # TODO: advanced control?
 
-        # initialisation done, set state to NO_MEDIA
+        # start from default options
+        user_mpv_options = mpv_options
+        player_options = _mpv_default_options.copy()
+
+        # add log handler
+        player_options.update({"log_handler": self._mpv_log_fn, "loglevel": "info"})
+
+        # add audio options
+        if no_audio:
+            player_options["ao"] = "null"
+        else:
+            player_options.update(_mpv_default_audio_options)
+            player_options["volume"] = (
+                0 if volume < 0 else 100 if volume > 1 else int(volume * 100)
+            )
+
+        # if monitor fps is provided, request display-vdrop video sync mode
+        # user can get fps with: window.getActualFrameRate()
+        # TODO: test if we really get display-vsync by reading PTS from frame info
+        if monitor_framerate is not None:
+            player_options["display-fps-override"] = monitor_framerate
+            player_options["video-sync"] = "display-vdrop"
+        else:
+            player_options["video-sync"] = "audio"
+
+        # apply user-specified MPV options
+        if user_mpv_options is not None:
+            player_options.update(user_mpv_options)
+
+        # lazy import MPV
+        self._mpv_lib = importlib.import_module("mpv")
+
+        # initialise MPV core
+        self._player = self._mpv_lib.MPV(**player_options)
+
+        # set EOF callback
+        self._player.observe_property("eof-reached", self._on_eof)
+
+        # *****************************************************
+        # OpenGL and draw mode (threaded/direct) initialisation
+        # *****************************************************
+
+        # find the OpenGl proc-address resolver
+        self._c_getproc = self._mpv_lib.MpvGlGetProcAddressFn(utils.get_gl_proc_address)
+
+        # initialise threaded, double-buffered or single-threaded, direct draw mode
+        if double_buffering:
+            # threaded, double-buffered drawing mode
+            # This function initialises the thread synchronisation context
+            # self._thread_state, and initialises and launches the worker thread,
+            # which stores its own MPV render context into `self._mpv_render_ctx`.
+            self._init_threaded_mode()
+        else:
+            # TODO: need init_direct() to create intermediate FBO to support scaling
+            # single-threaded, direct draw mode
+            self._thread_state = None
+            # create MPV's render context on the main thread
+            utils.make_gl_context_current(self._window.winHandle)
+            # same as: self._window.winHandle.switch_to()
+            self._mpv_render_ctx = self._create_render_context()
+
+        # From this point, the existence of `self._thread_state` indicates if threaded mode is active.
+
+        # *******************
+        # Initialisation done
+        # *******************
         self._state = MpvMoviestimState.NO_MEDIA
 
         # load movie if specified
@@ -415,30 +442,35 @@ class MpvMoviestim:
 
     @_log_pre_post
     @_state_guard(allowed_state=MpvMoviestimState.UNSPECIFIED)
-    def _init_mpv_player(self, mpv_options: dict[str, Any]) -> None:
-        """Initialise the MPV player core."""
-        # lazy load MPV
-        self._mpv_lib = importlib.import_module("mpv")
-
-        # create MPV player
-        self._player = self._mpv_lib.MPV(**mpv_options)
-
-        # set EOF callback
-        self._player.observe_property("eof-reached", self._on_eof)
-
-        # find the OpenGl proc-address resolver
-        self._c_getproc = self._mpv_lib.MpvGlGetProcAddressFn(utils.get_gl_proc_address)
-
-    @_log_pre_post
-    @_state_guard(allowed_state=MpvMoviestimState.UNSPECIFIED)
     def _infer_target_fbo_info(self) -> dict[str, int]:
-        # infer the target FBO information (size, pixel format) for the PsychoPy window
-        # must happen while the main window's context is current
+        """Infer size and pixel format of Psychopy's draw surface.
+
+        Depending on whether useFBO is set, PsychoPy either draws to the
+        screen backbuffer or to an intermediate FBO. We need to know the
+        size and pixel format of this target surface in order to properly
+        render video frames.
+
+        Returns
+        -------
+        dict[str, int]
+            A dictionary containing the size and pixel format of the target
+            FBO: {"fbo": int, "w": int, "h": int, "internal_format": int}
+
+        Notes
+        -----
+        - This function activates the Psychopy's window before querying it.
+        """
+        # Activate main window's OpenGL context
         assert self._window.winHandle is not None
         pyglet_window: BaseWindow = self._window.winHandle
         pyglet_window.switch_to()
         pyglet_window.activate()
+        # TODO: switch_to may be enough, test if activating is necessary
+
+        # Query Psychopy's FBO info
         psychopy_fbo_info = utils.get_psychopy_fbo_info(self._window)
+
+        # log
         format_name = (
             "<undetermined>"
             if "internal_format" not in psychopy_fbo_info
@@ -453,8 +485,23 @@ class MpvMoviestim:
 
     @_log_pre_post
     @_state_guard(allowed_state=MpvMoviestimState.UNSPECIFIED)
-    def _init_threading(self) -> None:
-        self._threading_state = ThreadingState()
+    def _init_threaded_mode(self) -> None:
+        """Initialise threaded, double-buffered drawing mode.
+
+        This function takes steps necessary to launch the worker thread,
+        which renders video frames from MPV into intermediate, double-
+        buffered FBOs. Thread synchronisation state is initialised and a
+        shadow OpenGL context (basically a shadow Pyglet window) is
+        created, before the worker is started.
+
+        Notes
+        -----
+        Calling this function has the following class-wide side-effects:
+        - `self._thread_state` is initialised
+        - `self._mpv_render_ctx` is created on the worker thread
+        """
+        if self._thread_state is not None:
+            raise RuntimeError("Threaded mode already initialised.")
 
         # Create the shadow window (shared context) on the main thread so
         # that its DC/surface is set up before the worker uses it.
@@ -463,23 +510,52 @@ class MpvMoviestim:
         logging.info("Creating shadow window for context sharing.")
         assert self._window.winHandle is not None
         pyglet_window: BaseWindow = self._window.winHandle
-        self._threading_state.shadow_window = utils.create_shadow_window(pyglet_window)
+        shadow_window = utils.create_shadow_window(pyglet_window)
 
-        # Start worker — it takes the shadow context, creates the render
+        # Create worker — it takes the shadow context, creates the render
         # context and the double-buffered intermediate FBOs, then signals
         # worker_init_done.
-        logging.info("Instantiating and starting renderer worker thread.")
-        self._threading_state.worker_thread = threading.Thread(
+        logging.info("Instantiating renderer worker thread.")
+        worker_thread = threading.Thread(
             target=self._render_worker, name="mpv-render-worker", daemon=True
         )
-        self._threading_state.worker_thread.start()
+
+        logging.info("Creating shared thread state.")
+        self._thread_state = SharedThreadedState(
+            worker_thread=worker_thread, shadow_window=shadow_window
+        )
+
+        logging.info("Starting renderer worker thread.")
+        self._thread_state.worker_thread.start()
 
         logging.info("Waiting for worker thread to initialise.")
-        if not self._threading_state.worker_init_done.wait(timeout=TIMEOUT_DEFAULT_S):
+        if not self._thread_state.worker_init_done.wait(timeout=TIMEOUT_DEFAULT_S):
             raise TimeoutError(
                 "Timed out waiting for render worker thread to initialise."
             )
         logging.info("Finished waiting for worker thread.")
+
+    @_log_pre_post
+    @_state_guard(allowed_state=MpvMoviestimState.UNSPECIFIED)
+    def _create_render_context(self) -> mpv.MpvRenderContext:
+        """Creates an OpenGL render context for MPV on the currently active thread.
+
+        Ensure that the current OpenGL context is active by calling `switch_to()`
+        on the appropriate Pyglet window, or by other means.
+        """
+        if self._mpv_lib is None or self._player is None or self._c_getproc is None:
+            raise RuntimeError(
+                "MPV library, player, or getproc function not initialised."
+            )
+
+        # Create MPV render context on the active thread, using the currently
+        # active OpenGL context.
+        return self._mpv_lib.MpvRenderContext(
+            self._player,
+            "opengl",
+            opengl_init_params={"get_proc_address": self._c_getproc},
+        )
+        # TODO: advanced_control=self._advanced_control,
 
     @staticmethod
     def _bounding_rect(
@@ -645,198 +721,8 @@ class MpvMoviestim:
         )
         return info, tex_id
 
-    # ------------------------------------------------------------------
-    # Worker thread
-    # ------------------------------------------------------------------
-
-    def _mpv_update_callback(self) -> None:
-        """Called by MPV when a new frame may be ready.
-
-        This function is only used in threaded mode. In direct rendering
-        mode, `draw()` calls MPV's update and render functions on each
-        iteration anyway, so this callback is not needed.
-
-        Notes
-        -----
-        - This function needs to be minimal to not cause any lag.
-        - If advanced control mode is enabled, MPV may call this callback
-        for various reasons, not just when a new vframe is available. In
-        any case, MPV's `render_ctx_update()` must be called immediately,
-        otherwise MPV's pipeline may be stalled.
-        - As per MPV API, `render_ctx_update` cannot be called from the
-        update callback (this function), and should be called from the
-        "render" thread, which in our case means the worker thread.
-        """
-        assert self._threading_state is not None
-        ts = self._threading_state
-        worker_wakeup_already_triggered = ts.wakeup_worker_trigger.is_set()
-        if not worker_wakeup_already_triggered:
-            ts.wakeup_worker_trigger.set()
-
-    def _render_worker(self) -> None:
-        """Worker thread: render new frames into intermediate buffers
-
-        Responsible for drawing new frames into an intermediate FBO
-
-        Notes
-        -----
-        Worker uses the shadow GL context, and owns the MPV render context and
-        the intermediate FBOs and textures.
-
-        Lifecycle:
-
-        - Init:
-          1. Make shadow OpenGL context current (once, for the life of this
-          thread).
-          2. Create `MpvRenderContext` using the shadow context.
-          3. Create double-buffered intermediate FBOs.
-          4. Signal `_worker_init_done` to unblock the main thread.
-
-        - Render loop:
-          1. Wake up on `_wakeup_worker_trigger` (set by MPV update callback).
-          2. Call `render_ctx_update()` to drain MPV updates and check for new
-          vframes.
-          3. Exit loop if `_stop_worker_event` is set.
-          4. If no new vframe is available, continue to wait for the next
-          update callback.
-          5. Set `_worker_is_rendering` to tell main thread that we're
-          rendering.
-          6. Acquire `buffer_fbo_lock` to get next FBO target, then release.
-          7. Render new vframe into the intermediate FBO.
-          8. Post a sync fence to GPU to ensure rendering finishes before FBO
-          is used.
-          9. With `buffer_fbo_lock`, request buffer flip and clear
-          `_worker_is_rendering`.
-          10. Signal `_worker_render_done`.
-
-        - Cleanup:
-          Free render context, destroy FBOs/textures, release context.
-
-        Synchronisation:
-        - Each worker iteration is triggered when `_wakeup_worker_trigger` is
-        set by the MPV update callback, cleared here.
-        - `buffer_fbo_lock` protects changes to intermediate FBO indices, the
-        `_worker_is_rendering` flag, and the `_buffer_flip_required` flag.
-        - `_worker_is_rendering` and the `_worker_render_done` event are used
-        to signal the main thread that a render is in progress. Main can decide
-        to wait for the render to finish, to display the newest video frame
-        available.
-        - `_buffer_flip_requred` is set by the worker to indicate that a new
-        video frame was rendered to the intermediate FBO. Buffer indices are
-        then flipped by the main thread.
-        """
-        assert self._threading_state is not None
-        ts = self._threading_state
-
-        # --- one-time init on this thread ---
-        if ts.shadow_window is None:
-            raise RuntimeError("shadow_window must be set before the worker starts")
-        utils.make_gl_context_current(ts.shadow_window)
-        # same as ts.shadow_window.switch_to()
-
-        # Log which renderer this context sees (sanity check that sharing works).
-        renderer = gl.glGetString(gl.GL_RENDERER)
-        logging.info(
-            f"MPV render worker: GL_RENDERER = {renderer if renderer else '<unknown>'}"
-        )
-
-        self._mpv_render_ctx = self._mpv_lib.MpvRenderContext(
-            self._player,
-            "opengl",
-            opengl_init_params={"get_proc_address": self._c_getproc},
-            # TODO: advanced_control=self._advanced_control,
-        )
-        self._mpv_render_ctx.update_cb = self._mpv_update_callback
-
-        # Double-buffered intermediate FBOs (created on the shadow context).
-        fbo1, tex1 = self._allocate_intermediate_fbo()
-        fbo2, tex2 = self._allocate_intermediate_fbo()
-        ts.intermediate_fbo_infos = (
-            fbo1,
-            fbo2,
-        )
-        ts.intermediate_fbo_textures = (
-            tex1,
-            tex2,
-        )
-        ts.worker_fbo_idx = 0
-        ts.present_fbo_idx = -1  # no frame ready yet
-
-        ts.worker_init_done.set()  # unblock main thread
-
-        # --- render loop ---
-        while True:
-            ts.wakeup_worker_trigger.wait()  # wait until the update callback is called
-            ts.wakeup_worker_trigger.clear()
-
-            # drain pending MPV updates, check whether there's a new vframe ready
-            update_result = self._mpv_render_ctx.update()
-
-            # if stop is signalled, exit
-            # Stop is placed here to ensure updates are drained first
-            # to avoid hanging MPV's core.
-            if ts.stop_worker_event.is_set():
-                break
-
-            # Ignore callbacks when there is no new frame to render
-            # (can happen when advanced control is enabled)
-            if not update_result:
-                continue
-
-            # Set busy flag to tell main not to flip buffers while we're rendering.
-            # If the main thread notices that we're rendering, it will wait for us
-            # to finish so that it can blit the newest frame.
-            # We essentially never need to wait for main as it only keeps the lock
-            # while flipping buffers.
-            ts.worker_render_done.clear()
-            with ts.buffer_fbo_lock:
-                ts.worker_is_rendering = True
-                target_idx = ts.worker_fbo_idx
-
-            fbo_info = ts.intermediate_fbo_infos[target_idx]
-
-            # The GPU may be still executing the main thread's blit from this FBO,
-            # so we do a GPU-side wait before we overwrite it.
-            if (blit_fence := ts.blit_fences[target_idx]) is not None:
-                gl.glWaitSync(blit_fence, 0, gl.GL_TIMEOUT_IGNORED)
-                gl.glDeleteSync(blit_fence)
-                ts.blit_fences[target_idx] = None
-
-            self._mpv_render_ctx.render(
-                opengl_fbo=fbo_info,
-                flip_y=True,
-                block_for_target_time=False,
-            )
-
-            # Post a fence so the main thread can wait for this render to finish
-            # before it blits.
-            ts.render_fences[target_idx] = gl.glFenceSync(
-                gl.GL_SYNC_GPU_COMMANDS_COMPLETE, 0
-            )
-            # flushing after fencesync is highly recommended to avoid stalls
-            gl.glFlush()
-
-            # Hand-off: clear rendering flag, signal buffer flip required
-            with ts.buffer_fbo_lock:
-                ts.worker_is_rendering = False
-                ts.buffer_flip_required = True
-
-            # After lock release so present_fbo_idx is committed before draw() reads it.
-            ts.worker_render_done.set()
-
-        # --- cleanup (shadow context still current on this thread) ---
-        self._mpv_render_ctx.free()
-        if ts.intermediate_fbo_textures is not None:
-            for tex in ts.intermediate_fbo_textures:
-                utils.gl_texture_destroy(tex)
-        if ts.intermediate_fbo_infos is not None:
-            for fbo in ts.intermediate_fbo_infos:
-                utils.gl_fbo_destroy(fbo["fbo"])
-        utils.release_gl_context()
-
-    def _mpv_log_fn(self, level: int, prefix: str, text: str) -> None:
-        # print(f"MPV: {level=}, {prefix=}, {text=}")
-        logging.exp(f"MPV({prefix}): {text}")
+    def _mpv_log_fn(self, _level: int, prefix: str, text: str) -> None:
+        logging.info(f"MPV({prefix}): {text}")
 
     @_log_pre_post
     def _on_eof(self, prop_name: str, value: bool | None) -> None:
@@ -1003,7 +889,7 @@ class MpvMoviestim:
         # advanced_control=True a permanent hang results if we call
         # wait_for_shutdown() while the worker is still alive.
         logging.info("telling worker thread to stop")
-        ts = self._threading_state
+        ts = self._thread_state
         ts.stop_worker_event.set()
         ts.wakeup_worker_trigger.set()  # wake worker if it is blocked on .wait()
         assert ts.worker_thread is not None, (
@@ -1043,6 +929,48 @@ class MpvMoviestim:
     #     self._player.command("frame-step", "1")
 
     def draw(self) -> None:
+        # Don't use the guard wrapper here for performance reasons.
+        if self._state != MpvMoviestimState.PLAYING:
+            logging.warning(
+                f"Cannot draw(), expected PLAYING state, got {self._state.name}."
+            )
+            return
+        if self._draw_rect is None:
+            logging.error("draw() called but draw rectangle is undefined.")
+            return
+
+        if self._thread_state is not None:
+            self._draw_threaded()
+        else:
+            self._draw_direct()
+
+    def _draw_direct(self) -> None:
+        """Draw directly from MPV into Psychopy's target surface.
+
+        This function tells MPV to render its current video frame on
+        each call - which should correspond to once a vsync refresh.
+
+        For performance reasons, use this only when the media framerate is
+        equal to or higher than the display framerate. Depending on the
+        video-sync mode and who knows what, MPV may not always buffer
+        ready-to-render vframes, so this approach only makes sense when
+        MPV has to render a new frame on each vsync cycle anyway.
+        """
+        ctx = self._mpv_render_ctx
+        # TODO: we need an intermediate FBO to be able to resize the video!
+
+        # call update just to flush messages
+        ctx.update()
+
+        # mpv._mpv_render_context_get_info(ctx._handle, frameinfo)
+
+        ctx.render(
+            opengl_fbo=self._target_fbo_info,
+            flip_y=True,
+            block_for_target_time=False,
+        )
+
+    def _draw_threaded(self) -> None:
         """Blit the latest worker-rendered frame to PsychoPy's FBO.
 
         This method should be called in PsychoPy's main render loop
@@ -1056,21 +984,11 @@ class MpvMoviestim:
         * If profiling was enabled at construction, this method also records
         per-iteration timestamps; retrieve them with ``get_profiling_data()``.
         """
-        # Don't use the guard wrapper here for performance reasons.
-        if self._state != MpvMoviestimState.PLAYING:
-            logging.warning(
-                f"Cannot draw(), expected PLAYING state, got {self._state.name}."
-            )
-            return
-
-        ts = self._threading_state
+        assert self._thread_state is not None
+        ts = self._thread_state
 
         if ts.intermediate_fbo_infos is None:
             logging.error("draw() called but intermediate FBOs are not initialized.")
-            return
-
-        if self._draw_rect is None:
-            logging.error("draw() called but draw rectangle is undefined.")
             return
 
         # the worker thread fills the buffers and indicates when a new one is available
@@ -1115,6 +1033,7 @@ class MpvMoviestim:
             ts.render_fences[present_idx] = None
 
         # Blit intermediate FBO → PsychoPy's target FBO.
+        assert self._draw_rect is not None
         utils.gl_blit_with_draw_rect(
             self._draw_rect,
             fbo_info["fbo"],
@@ -1172,3 +1091,191 @@ class MpvMoviestim:
         if self._player.eof_reached:
             return MpvMoviestimState.EOF_REACHED
         return MpvMoviestimState.UNSPECIFIED
+
+    # ------------------------------------------------------------------
+    # Worker thread
+    # ------------------------------------------------------------------
+
+    def _mpv_update_callback(self) -> None:
+        """Called by MPV when a new frame may be ready.
+
+        This function is only used in threaded mode. In direct rendering
+        mode, `draw()` calls MPV's update and render functions on each
+        iteration anyway, so this callback is not needed.
+
+        Notes
+        -----
+        - This function needs to be minimal to not cause any lag.
+        - If advanced control mode is enabled, MPV may call this callback
+        for various reasons, not just when a new vframe is available. In
+        any case, MPV's `render_ctx_update()` must be called immediately,
+        otherwise MPV's pipeline may be stalled.
+        - As per MPV API, `render_ctx_update` cannot be called from the
+        update callback (this function), and should be called from the
+        "render" thread, which in our case means the worker thread.
+        """
+        assert self._thread_state is not None
+        ts = self._thread_state
+        worker_wakeup_already_triggered = ts.wakeup_worker_trigger.is_set()
+        if not worker_wakeup_already_triggered:
+            ts.wakeup_worker_trigger.set()
+
+    def _render_worker(self) -> None:
+        """Worker thread: render new frames into intermediate buffers
+
+        Responsible for drawing new frames into an intermediate FBO
+
+        Notes
+        -----
+        Worker uses the shadow GL context, and owns the MPV render context and
+        the intermediate FBOs and textures.
+
+        Lifecycle:
+
+        - Init:
+          1. Make shadow OpenGL context current (once, for the life of this
+          thread).
+          2. Create `MpvRenderContext` using the shadow context.
+          3. Create double-buffered intermediate FBOs.
+          4. Signal `_worker_init_done` to unblock the main thread.
+
+        - Render loop:
+          1. Wake up on `_wakeup_worker_trigger` (set by MPV update callback).
+          2. Call `render_ctx_update()` to drain MPV updates and check for new
+          vframes.
+          3. Exit loop if `_stop_worker_event` is set.
+          4. If no new vframe is available, continue to wait for the next
+          update callback.
+          5. Set `_worker_is_rendering` to tell main thread that we're
+          rendering.
+          6. Acquire `buffer_fbo_lock` to get next FBO target, then release.
+          7. Render new vframe into the intermediate FBO.
+          8. Post a sync fence to GPU to ensure rendering finishes before FBO
+          is used.
+          9. With `buffer_fbo_lock`, request buffer flip and clear
+          `_worker_is_rendering`.
+          10. Signal `_worker_render_done`.
+
+        - Cleanup:
+          Free render context, destroy FBOs/textures, release context.
+
+        Synchronisation:
+        - Each worker iteration is triggered when `_wakeup_worker_trigger` is
+        set by the MPV update callback, cleared here.
+        - `buffer_fbo_lock` protects changes to intermediate FBO indices, the
+        `_worker_is_rendering` flag, and the `_buffer_flip_required` flag.
+        - `_worker_is_rendering` and the `_worker_render_done` event are used
+        to signal the main thread that a render is in progress. Main can decide
+        to wait for the render to finish, to display the newest video frame
+        available.
+        - `_buffer_flip_requred` is set by the worker to indicate that a new
+        video frame was rendered to the intermediate FBO. Buffer indices are
+        then flipped by the main thread.
+        """
+        assert self._thread_state is not None
+        # --- one-time init on this thread ---
+        ts = self._thread_state
+
+        # activate shadow OpenGL context once and for all on this thread
+        utils.make_gl_context_current(ts.shadow_window)
+        # same as: ts.shadow_window.switch_to()
+
+        # # Log which renderer this context sees (sanity check that sharing works).
+        # renderer = gl.glGetString(gl.GL_RENDERER)
+        # logging.info(
+        #     f"MPV render worker: GL_RENDERER = {renderer if renderer else '<unknown>'}"
+        # )
+
+        # create MPV render context
+        self._mpv_render_ctx = self._create_render_context()
+        self._mpv_render_ctx.update_cb = self._mpv_update_callback
+
+        # allocate intermediate FBOs for double buffering
+        fbo1, tex1 = self._allocate_intermediate_fbo()
+        fbo2, tex2 = self._allocate_intermediate_fbo()
+        ts.intermediate_fbo_infos = (
+            fbo1,
+            fbo2,
+        )
+        ts.intermediate_fbo_textures = (
+            tex1,
+            tex2,
+        )
+
+        # set initial buffer indices
+        ts.worker_fbo_idx = 0
+        ts.present_fbo_idx = -1  # no frame ready yet
+
+        ts.worker_init_done.set()  # unblock main thread
+
+        # --- render loop ---
+        while True:
+            ts.wakeup_worker_trigger.wait()  # wait until MPV calls the update callback
+            ts.wakeup_worker_trigger.clear()
+
+            # drain pending MPV updates, remember whether there's a new vframe ready
+            new_vframe_available = self._mpv_render_ctx.update()
+
+            # if stop is signalled, exit
+            # Stop is placed here to ensure updates are drained first
+            # to avoid hanging MPV's core.
+            if ts.stop_worker_event.is_set():
+                break
+
+            # Ignore callbacks when there is no new frame to render
+            # (can happen when advanced control is enabled)
+            if not new_vframe_available:
+                continue
+
+            # Set busy flag to tell main not to flip buffers while we're rendering.
+            # If the main thread notices that we're rendering, it will wait for us
+            # to finish so that it can blit the newest frame.
+            # We essentially never need to wait for main as it only keeps the lock
+            # while flipping buffers.
+            ts.worker_render_done.clear()
+            with ts.buffer_fbo_lock:
+                ts.worker_is_rendering = True
+                target_idx = ts.worker_fbo_idx
+
+            fbo_info = ts.intermediate_fbo_infos[target_idx]
+
+            # The GPU may be still executing the main thread's blit from this FBO,
+            # so we do a GPU-side wait before we overwrite it.
+            if (blit_fence := ts.blit_fences[target_idx]) is not None:
+                gl.glWaitSync(blit_fence, 0, gl.GL_TIMEOUT_IGNORED)
+                gl.glDeleteSync(blit_fence)
+                ts.blit_fences[target_idx] = None
+
+            self._mpv_render_ctx.render(
+                opengl_fbo=fbo_info,
+                flip_y=True,
+                block_for_target_time=False,
+            )
+
+            # Post a fence so the main thread can wait for this render to finish
+            # before it blits.
+            ts.render_fences[target_idx] = gl.glFenceSync(
+                gl.GL_SYNC_GPU_COMMANDS_COMPLETE, 0
+            )
+            # flushing after fencesync is highly recommended to avoid stalls
+            gl.glFlush()
+
+            # Hand-off: clear rendering flag, signal buffer flip required
+            with ts.buffer_fbo_lock:
+                ts.worker_is_rendering = False
+                ts.buffer_flip_required = True
+
+            # After lock release so present_fbo_idx is committed before draw() reads it.
+            ts.worker_render_done.set()
+
+        # TODO: allow another media to be loaded and played without stopping completely
+
+        # --- cleanup (shadow context still current on this thread) ---
+        self._mpv_render_ctx.free()
+        if ts.intermediate_fbo_textures is not None:
+            for tex in ts.intermediate_fbo_textures:
+                utils.gl_texture_destroy(tex)
+        if ts.intermediate_fbo_infos is not None:
+            for fbo in ts.intermediate_fbo_infos:
+                utils.gl_fbo_destroy(fbo["fbo"])
+        utils.release_gl_context()

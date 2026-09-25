@@ -89,13 +89,15 @@ def get_psychopy_fbo_info(
         internal_format: int
             OpenGL number of the best matching format.
             This field is only present if a best format can be determined.
-    str
-        Best-match format string (for example `rgba32f`), or empty string
-        if undetermined.
 
     Notes
     -----
-    The OpenGL context of the provided window is assumed to be current.
+    * The OpenGL context of the provided window is assumed to be current.
+    * Typically, PsychoPy's intermediate FBO has the RGBA32F pixel format,
+      while the screen backbuffer has something like RGB8.
+    * In some cases, atypical internal formats may not be correctly detected,
+      in which case the returned info may omit the `internal_format` field.
+
     """
 
     def _get_gl_int(pname: int) -> int:
