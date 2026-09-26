@@ -202,7 +202,7 @@ def _resolve_gl_proc_with_pyglet(name: bytes) -> int:
     # macOS
     elif platform == "darwin":
         pyglet_lib_name = "pyglet.gl.lib_agl"
-        getprocaddress_func_names = []
+        getprocaddress_func_names: list[str] = []
 
     else:
         logging.error(
@@ -401,8 +401,9 @@ def gl_blit_with_draw_rect(
 ) -> None:
     """Blit image to FBO/tex
 
-    This routine is intended to cached, ready-to-draw FBO/tex.The image must
-    already be scaled to the target size. Image rect may extend over screen
+    This routine copies image data between FBOs without scaling. The rect
+    [0, 0, w, h] from the source is drawn to the rect [x, y, x+w, y+h]on the
+    draw target, not considering flips. The image rect may extend over screen
     borders - those parts are automatically trimmed by the blit.
 
     Parameters
@@ -420,14 +421,12 @@ def gl_blit_with_draw_rect(
 
     Notes
     -----
-    * This function draws the rect [0, 0, w, h] from the source to the rect
-      [x, y, x+w, y+h] on the draw target, not considering flips.
-    * PsychoPy's strategy is to set the draw target FBO once and then draw all
-      screen elements to it without setting the FBO again. Here, we initially
-      set both read and draw FBOs to be safe that the correct ones are active,
-      since libMPV may have changed them, but only save and restore the state
-      of the read FBO. Our target FBO is the same as the one Psychopy uses,
-      so it can be left as is.
+    PsychoPy's strategy is to set the draw target FBO once and then draw all
+    screen elements to it without setting the FBO again. Here, we initially
+    set both read and draw FBOs to be safe that the correct ones are active,
+    since libMPV may have changed them, but only save and restore the state
+    of the read FBO. Our target FBO is the same as the one Psychopy uses,
+    so it can be left as is.
     """
 
     # Save previously bound FBOs
@@ -446,8 +445,11 @@ def gl_blit_with_draw_rect(
         sx0, sx1 = sx1, sx0
     if flipVert:
         sy0, sy1 = sy1, sy0
-    dx0, dx1 = draw_rect[0], draw_rect[0] + draw_rect[2]  # destination bottom-left
-    dy0, dy1 = draw_rect[1], draw_rect[1] + draw_rect[3]  # destination top-right
+    dx0, dy0 = draw_rect[0], draw_rect[1]  # destination bottom-left
+    dx1, dy1 = (
+        dx0 + draw_rect[2],
+        dy0 + draw_rect[3],
+    )  # destination top-right
 
     # Draw
     gl.glBlitFramebuffer(
