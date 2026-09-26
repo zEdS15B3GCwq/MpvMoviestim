@@ -1,50 +1,56 @@
-# ❯  python .\bench_enum_retrieval.py --cycles 1000 --repeats 3
-# cycles=1,000, repeats=3, field_count=128
+# ❯  python .\tests\benchmarks\bench_enum_retrieval.py                                                                                                                 took 5.932s 
+# cycles=10,000, repeats=5, field_count=128
 
 # 15 sequential retrievals
-#   slotted instance + direct names      0.16 ms     10.93 ns/retrieval   1.00x
-#   classvars + direct names          0.17 ms     11.59 ns/retrieval   1.06x
-#   plain class + direct names        0.17 ms     11.59 ns/retrieval   1.06x
-#   namedtuple + direct names         0.22 ms     14.75 ns/retrieval   1.35x
-#   IntEnum + direct names            0.24 ms     16.07 ns/retrieval   1.47x
-#   Dict + direct names               0.26 ms     17.23 ns/retrieval   1.58x
-#   named dict[name]                  0.49 ms     32.49 ns/retrieval   2.97x
-#   plain class + getattr             0.59 ms     39.25 ns/retrieval   3.59x
-#   named tuple + getattr             0.60 ms     40.19 ns/retrieval   3.68x
-#   slotted instance + getattr        0.61 ms     40.65 ns/retrieval   3.72x
-#   Enum + direct names               1.13 ms     75.39 ns/retrieval   6.90x
-#   Enum[name].value                  1.70 ms    113.66 ns/retrieval  10.40x
-#   IntEnum[name].value               1.83 ms    122.30 ns/retrieval  11.19x
+#   slotted instance + direct names      1.47 ms      9.77 ns/retrieval   1.00x
+#   classvars + direct names          1.87 ms     12.49 ns/retrieval   1.28x
+#   plain class + direct names        1.95 ms     13.00 ns/retrieval   1.33x
+#   slotted dataclass + direct names      2.05 ms     13.67 ns/retrieval   1.40x
+#   dataclass + direct names          2.08 ms     13.88 ns/retrieval   1.42x
+#   namedtuple + direct names         2.24 ms     14.92 ns/retrieval   1.53x
+#   Dict + direct names               2.53 ms     16.84 ns/retrieval   1.72x
+#   named dict[name]                  4.78 ms     31.86 ns/retrieval   3.26x
+#   plain class + getattr             5.19 ms     34.62 ns/retrieval   3.54x
+#   IntEnum + direct names            5.42 ms     36.11 ns/retrieval   3.70x
+#   slotted instance + getattr        5.49 ms     36.60 ns/retrieval   3.75x
+#   named tuple + getattr             5.86 ms     39.07 ns/retrieval   4.00x
+#   Enum + direct names              17.95 ms    119.66 ns/retrieval  12.25x
+#   Enum[name].value                 26.12 ms    174.11 ns/retrieval  17.82x
+#   IntEnum[name].value              26.16 ms    174.38 ns/retrieval  17.85x
 
 # 20 sequential retrievals
-#   slotted instance + direct names      0.20 ms      9.79 ns/retrieval   1.00x
-#   classvars + direct names          0.21 ms     10.59 ns/retrieval   1.08x
-#   plain class + direct names        0.21 ms     10.60 ns/retrieval   1.08x
-#   namedtuple + direct names         0.29 ms     14.55 ns/retrieval   1.49x
-#   IntEnum + direct names            0.31 ms     15.66 ns/retrieval   1.60x
-#   Dict + direct names               0.33 ms     16.57 ns/retrieval   1.69x
-#   named dict[name]                  0.62 ms     30.99 ns/retrieval   3.17x
-#   plain class + getattr             0.73 ms     36.58 ns/retrieval   3.74x
-#   named tuple + getattr             0.75 ms     37.59 ns/retrieval   3.84x
-#   slotted instance + getattr        0.79 ms     39.30 ns/retrieval   4.01x
-#   Enum + direct names               1.50 ms     74.81 ns/retrieval   7.64x
-#   Enum[name].value                  2.18 ms    109.23 ns/retrieval  11.16x
-#   IntEnum[name].value               2.40 ms    120.06 ns/retrieval  12.26x
+#   slotted instance + direct names      1.97 ms      9.85 ns/retrieval   1.00x
+#   classvars + direct names          2.53 ms     12.67 ns/retrieval   1.29x
+#   plain class + direct names        2.60 ms     13.02 ns/retrieval   1.32x
+#   slotted dataclass + direct names      2.68 ms     13.40 ns/retrieval   1.36x
+#   dataclass + direct names          2.69 ms     13.47 ns/retrieval   1.37x
+#   namedtuple + direct names         3.06 ms     15.30 ns/retrieval   1.55x
+#   Dict + direct names               3.11 ms     15.57 ns/retrieval   1.58x
+#   named dict[name]                  6.09 ms     30.44 ns/retrieval   3.09x
+#   plain class + getattr             6.62 ms     33.09 ns/retrieval   3.36x
+#   IntEnum + direct names            7.05 ms     35.23 ns/retrieval   3.58x
+#   slotted instance + getattr        7.08 ms     35.41 ns/retrieval   3.60x
+#   named tuple + getattr             7.42 ms     37.10 ns/retrieval   3.77x
+#   Enum + direct names              23.93 ms    119.63 ns/retrieval  12.15x
+#   Enum[name].value                 34.73 ms    173.65 ns/retrieval  17.64x
+#   IntEnum[name].value              34.75 ms    173.77 ns/retrieval  17.65x
 
 # 128 sequential retrievals
-#   slotted instance + direct names      1.75 ms     13.64 ns/retrieval   1.00x
-#   plain class + direct names        1.85 ms     14.43 ns/retrieval   1.06x
-#   classvars + direct names          1.88 ms     14.68 ns/retrieval   1.08x
-#   namedtuple + direct names         2.44 ms     19.04 ns/retrieval   1.40x
-#   Dict + direct names               2.88 ms     22.48 ns/retrieval   1.65x
-#   IntEnum + direct names            2.93 ms     22.90 ns/retrieval   1.68x
-#   named dict[name]                  3.85 ms     30.10 ns/retrieval   2.21x
-#   plain class + getattr             4.05 ms     31.67 ns/retrieval   2.32x
-#   named tuple + getattr             4.15 ms     32.42 ns/retrieval   2.38x
-#   slotted instance + getattr        4.33 ms     33.85 ns/retrieval   2.48x
-#   Enum + direct names              12.53 ms     97.88 ns/retrieval   7.18x
-#   Enum[name].value                 12.94 ms    101.08 ns/retrieval   7.41x
-#   IntEnum[name].value              13.83 ms    108.01 ns/retrieval   7.92x
+#   slotted instance + direct names     15.19 ms     11.86 ns/retrieval   1.00x
+#   classvars + direct names         20.25 ms     15.82 ns/retrieval   1.33x
+#   slotted dataclass + direct names     21.24 ms     16.59 ns/retrieval   1.40x
+#   plain class + direct names       21.32 ms     16.66 ns/retrieval   1.40x
+#   dataclass + direct names         21.44 ms     16.75 ns/retrieval   1.41x
+#   namedtuple + direct names        23.39 ms     18.27 ns/retrieval   1.54x
+#   Dict + direct names              24.29 ms     18.97 ns/retrieval   1.60x
+#   named dict[name]                 40.10 ms     31.33 ns/retrieval   2.64x
+#   plain class + getattr            40.48 ms     31.62 ns/retrieval   2.67x
+#   named tuple + getattr            42.25 ms     33.01 ns/retrieval   2.78x
+#   slotted instance + getattr       42.37 ms     33.10 ns/retrieval   2.79x
+#   IntEnum + direct names           56.42 ms     44.08 ns/retrieval   3.72x
+#   Enum + direct names             191.56 ms    149.65 ns/retrieval  12.61x
+#   IntEnum[name].value             220.29 ms    172.10 ns/retrieval  14.51x
+#   Enum[name].value                220.73 ms    172.45 ns/retrieval  14.53x
 """Benchmark numeric field lookup strategies.
 
 Run with, for example:
@@ -54,6 +60,7 @@ Run with, for example:
 import argparse
 import time
 from collections import namedtuple
+from dataclasses import dataclass
 from enum import Enum, IntEnum
 
 FIELD_COUNT = 128
@@ -199,6 +206,276 @@ class CV:
     FIELD_125 = 125
     FIELD_126 = 126
     FIELD_127 = 127
+
+
+@dataclass
+class CV_dataclass:
+    FIELD_0 = 0
+    FIELD_1 = 1
+    FIELD_2 = 2
+    FIELD_3 = 3
+    FIELD_4 = 4
+    FIELD_5 = 5
+    FIELD_6 = 6
+    FIELD_7 = 7
+    FIELD_8 = 8
+    FIELD_9 = 9
+    FIELD_10 = 10
+    FIELD_11 = 11
+    FIELD_12 = 12
+    FIELD_13 = 13
+    FIELD_14 = 14
+    FIELD_15 = 15
+    FIELD_16 = 16
+    FIELD_17 = 17
+    FIELD_18 = 18
+    FIELD_19 = 19
+    FIELD_20 = 20
+    FIELD_21 = 21
+    FIELD_22 = 22
+    FIELD_23 = 23
+    FIELD_24 = 24
+    FIELD_25 = 25
+    FIELD_26 = 26
+    FIELD_27 = 27
+    FIELD_28 = 28
+    FIELD_29 = 29
+    FIELD_30 = 30
+    FIELD_31 = 31
+    FIELD_32 = 32
+    FIELD_33 = 33
+    FIELD_34 = 34
+    FIELD_35 = 35
+    FIELD_36 = 36
+    FIELD_37 = 37
+    FIELD_38 = 38
+    FIELD_39 = 39
+    FIELD_40 = 40
+    FIELD_41 = 41
+    FIELD_42 = 42
+    FIELD_43 = 43
+    FIELD_44 = 44
+    FIELD_45 = 45
+    FIELD_46 = 46
+    FIELD_47 = 47
+    FIELD_48 = 48
+    FIELD_49 = 49
+    FIELD_50 = 50
+    FIELD_51 = 51
+    FIELD_52 = 52
+    FIELD_53 = 53
+    FIELD_54 = 54
+    FIELD_55 = 55
+    FIELD_56 = 56
+    FIELD_57 = 57
+    FIELD_58 = 58
+    FIELD_59 = 59
+    FIELD_60 = 60
+    FIELD_61 = 61
+    FIELD_62 = 62
+    FIELD_63 = 63
+    FIELD_64 = 64
+    FIELD_65 = 65
+    FIELD_66 = 66
+    FIELD_67 = 67
+    FIELD_68 = 68
+    FIELD_69 = 69
+    FIELD_70 = 70
+    FIELD_71 = 71
+    FIELD_72 = 72
+    FIELD_73 = 73
+    FIELD_74 = 74
+    FIELD_75 = 75
+    FIELD_76 = 76
+    FIELD_77 = 77
+    FIELD_78 = 78
+    FIELD_79 = 79
+    FIELD_80 = 80
+    FIELD_81 = 81
+    FIELD_82 = 82
+    FIELD_83 = 83
+    FIELD_84 = 84
+    FIELD_85 = 85
+    FIELD_86 = 86
+    FIELD_87 = 87
+    FIELD_88 = 88
+    FIELD_89 = 89
+    FIELD_90 = 90
+    FIELD_91 = 91
+    FIELD_92 = 92
+    FIELD_93 = 93
+    FIELD_94 = 94
+    FIELD_95 = 95
+    FIELD_96 = 96
+    FIELD_97 = 97
+    FIELD_98 = 98
+    FIELD_99 = 99
+    FIELD_100 = 100
+    FIELD_101 = 101
+    FIELD_102 = 102
+    FIELD_103 = 103
+    FIELD_104 = 104
+    FIELD_105 = 105
+    FIELD_106 = 106
+    FIELD_107 = 107
+    FIELD_108 = 108
+    FIELD_109 = 109
+    FIELD_110 = 110
+    FIELD_111 = 111
+    FIELD_112 = 112
+    FIELD_113 = 113
+    FIELD_114 = 114
+    FIELD_115 = 115
+    FIELD_116 = 116
+    FIELD_117 = 117
+    FIELD_118 = 118
+    FIELD_119 = 119
+    FIELD_120 = 120
+    FIELD_121 = 121
+    FIELD_122 = 122
+    FIELD_123 = 123
+    FIELD_124 = 124
+    FIELD_125 = 125
+    FIELD_126 = 126
+    FIELD_127 = 127
+
+
+cv_dataclass = CV_dataclass()
+
+
+@dataclass(slots=True)
+class CV_slotted_dataclass:
+    FIELD_0 = 0
+    FIELD_1 = 1
+    FIELD_2 = 2
+    FIELD_3 = 3
+    FIELD_4 = 4
+    FIELD_5 = 5
+    FIELD_6 = 6
+    FIELD_7 = 7
+    FIELD_8 = 8
+    FIELD_9 = 9
+    FIELD_10 = 10
+    FIELD_11 = 11
+    FIELD_12 = 12
+    FIELD_13 = 13
+    FIELD_14 = 14
+    FIELD_15 = 15
+    FIELD_16 = 16
+    FIELD_17 = 17
+    FIELD_18 = 18
+    FIELD_19 = 19
+    FIELD_20 = 20
+    FIELD_21 = 21
+    FIELD_22 = 22
+    FIELD_23 = 23
+    FIELD_24 = 24
+    FIELD_25 = 25
+    FIELD_26 = 26
+    FIELD_27 = 27
+    FIELD_28 = 28
+    FIELD_29 = 29
+    FIELD_30 = 30
+    FIELD_31 = 31
+    FIELD_32 = 32
+    FIELD_33 = 33
+    FIELD_34 = 34
+    FIELD_35 = 35
+    FIELD_36 = 36
+    FIELD_37 = 37
+    FIELD_38 = 38
+    FIELD_39 = 39
+    FIELD_40 = 40
+    FIELD_41 = 41
+    FIELD_42 = 42
+    FIELD_43 = 43
+    FIELD_44 = 44
+    FIELD_45 = 45
+    FIELD_46 = 46
+    FIELD_47 = 47
+    FIELD_48 = 48
+    FIELD_49 = 49
+    FIELD_50 = 50
+    FIELD_51 = 51
+    FIELD_52 = 52
+    FIELD_53 = 53
+    FIELD_54 = 54
+    FIELD_55 = 55
+    FIELD_56 = 56
+    FIELD_57 = 57
+    FIELD_58 = 58
+    FIELD_59 = 59
+    FIELD_60 = 60
+    FIELD_61 = 61
+    FIELD_62 = 62
+    FIELD_63 = 63
+    FIELD_64 = 64
+    FIELD_65 = 65
+    FIELD_66 = 66
+    FIELD_67 = 67
+    FIELD_68 = 68
+    FIELD_69 = 69
+    FIELD_70 = 70
+    FIELD_71 = 71
+    FIELD_72 = 72
+    FIELD_73 = 73
+    FIELD_74 = 74
+    FIELD_75 = 75
+    FIELD_76 = 76
+    FIELD_77 = 77
+    FIELD_78 = 78
+    FIELD_79 = 79
+    FIELD_80 = 80
+    FIELD_81 = 81
+    FIELD_82 = 82
+    FIELD_83 = 83
+    FIELD_84 = 84
+    FIELD_85 = 85
+    FIELD_86 = 86
+    FIELD_87 = 87
+    FIELD_88 = 88
+    FIELD_89 = 89
+    FIELD_90 = 90
+    FIELD_91 = 91
+    FIELD_92 = 92
+    FIELD_93 = 93
+    FIELD_94 = 94
+    FIELD_95 = 95
+    FIELD_96 = 96
+    FIELD_97 = 97
+    FIELD_98 = 98
+    FIELD_99 = 99
+    FIELD_100 = 100
+    FIELD_101 = 101
+    FIELD_102 = 102
+    FIELD_103 = 103
+    FIELD_104 = 104
+    FIELD_105 = 105
+    FIELD_106 = 106
+    FIELD_107 = 107
+    FIELD_108 = 108
+    FIELD_109 = 109
+    FIELD_110 = 110
+    FIELD_111 = 111
+    FIELD_112 = 112
+    FIELD_113 = 113
+    FIELD_114 = 114
+    FIELD_115 = 115
+    FIELD_116 = 116
+    FIELD_117 = 117
+    FIELD_118 = 118
+    FIELD_119 = 119
+    FIELD_120 = 120
+    FIELD_121 = 121
+    FIELD_122 = 122
+    FIELD_123 = 123
+    FIELD_124 = 124
+    FIELD_125 = 125
+    FIELD_126 = 126
+    FIELD_127 = 127
+
+
+cv_slotted_dataclass = CV_slotted_dataclass()
 
 
 class PlainClass:
@@ -804,6 +1081,366 @@ def retrieve_classvars_direct_128(_start, _n_slots):
             CV.FIELD_125,
             CV.FIELD_126,
             CV.FIELD_127,
+        )
+    )
+
+
+def retrieve_cv_dataclass_direct_15(_start, _n_slots):
+    return (
+        cv_dataclass.FIELD_0
+        + cv_dataclass.FIELD_1
+        + cv_dataclass.FIELD_2
+        + cv_dataclass.FIELD_3
+        + cv_dataclass.FIELD_4
+        + cv_dataclass.FIELD_5
+        + cv_dataclass.FIELD_6
+        + cv_dataclass.FIELD_7
+        + cv_dataclass.FIELD_8
+        + cv_dataclass.FIELD_9
+        + cv_dataclass.FIELD_10
+        + cv_dataclass.FIELD_11
+        + cv_dataclass.FIELD_12
+        + cv_dataclass.FIELD_13
+        + cv_dataclass.FIELD_14
+    )
+
+
+def retrieve_cv_dataclass_direct_20(_start, _n_slots):
+    return (
+        cv_dataclass.FIELD_0
+        + cv_dataclass.FIELD_1
+        + cv_dataclass.FIELD_2
+        + cv_dataclass.FIELD_3
+        + cv_dataclass.FIELD_4
+        + cv_dataclass.FIELD_5
+        + cv_dataclass.FIELD_6
+        + cv_dataclass.FIELD_7
+        + cv_dataclass.FIELD_8
+        + cv_dataclass.FIELD_9
+        + cv_dataclass.FIELD_10
+        + cv_dataclass.FIELD_11
+        + cv_dataclass.FIELD_12
+        + cv_dataclass.FIELD_13
+        + cv_dataclass.FIELD_14
+        + cv_dataclass.FIELD_15
+        + cv_dataclass.FIELD_16
+        + cv_dataclass.FIELD_17
+        + cv_dataclass.FIELD_18
+        + cv_dataclass.FIELD_19
+    )
+
+
+def retrieve_cv_dataclass_direct_128(_start, _n_slots):
+    return sum(
+        (
+            cv_dataclass.FIELD_0,
+            cv_dataclass.FIELD_1,
+            cv_dataclass.FIELD_2,
+            cv_dataclass.FIELD_3,
+            cv_dataclass.FIELD_4,
+            cv_dataclass.FIELD_5,
+            cv_dataclass.FIELD_6,
+            cv_dataclass.FIELD_7,
+            cv_dataclass.FIELD_8,
+            cv_dataclass.FIELD_9,
+            cv_dataclass.FIELD_10,
+            cv_dataclass.FIELD_11,
+            cv_dataclass.FIELD_12,
+            cv_dataclass.FIELD_13,
+            cv_dataclass.FIELD_14,
+            cv_dataclass.FIELD_15,
+            cv_dataclass.FIELD_16,
+            cv_dataclass.FIELD_17,
+            cv_dataclass.FIELD_18,
+            cv_dataclass.FIELD_19,
+            cv_dataclass.FIELD_20,
+            cv_dataclass.FIELD_21,
+            cv_dataclass.FIELD_22,
+            cv_dataclass.FIELD_23,
+            cv_dataclass.FIELD_24,
+            cv_dataclass.FIELD_25,
+            cv_dataclass.FIELD_26,
+            cv_dataclass.FIELD_27,
+            cv_dataclass.FIELD_28,
+            cv_dataclass.FIELD_29,
+            cv_dataclass.FIELD_30,
+            cv_dataclass.FIELD_31,
+            cv_dataclass.FIELD_32,
+            cv_dataclass.FIELD_33,
+            cv_dataclass.FIELD_34,
+            cv_dataclass.FIELD_35,
+            cv_dataclass.FIELD_36,
+            cv_dataclass.FIELD_37,
+            cv_dataclass.FIELD_38,
+            cv_dataclass.FIELD_39,
+            cv_dataclass.FIELD_40,
+            cv_dataclass.FIELD_41,
+            cv_dataclass.FIELD_42,
+            cv_dataclass.FIELD_43,
+            cv_dataclass.FIELD_44,
+            cv_dataclass.FIELD_45,
+            cv_dataclass.FIELD_46,
+            cv_dataclass.FIELD_47,
+            cv_dataclass.FIELD_48,
+            cv_dataclass.FIELD_49,
+            cv_dataclass.FIELD_50,
+            cv_dataclass.FIELD_51,
+            cv_dataclass.FIELD_52,
+            cv_dataclass.FIELD_53,
+            cv_dataclass.FIELD_54,
+            cv_dataclass.FIELD_55,
+            cv_dataclass.FIELD_56,
+            cv_dataclass.FIELD_57,
+            cv_dataclass.FIELD_58,
+            cv_dataclass.FIELD_59,
+            cv_dataclass.FIELD_60,
+            cv_dataclass.FIELD_61,
+            cv_dataclass.FIELD_62,
+            cv_dataclass.FIELD_63,
+            cv_dataclass.FIELD_64,
+            cv_dataclass.FIELD_65,
+            cv_dataclass.FIELD_66,
+            cv_dataclass.FIELD_67,
+            cv_dataclass.FIELD_68,
+            cv_dataclass.FIELD_69,
+            cv_dataclass.FIELD_70,
+            cv_dataclass.FIELD_71,
+            cv_dataclass.FIELD_72,
+            cv_dataclass.FIELD_73,
+            cv_dataclass.FIELD_74,
+            cv_dataclass.FIELD_75,
+            cv_dataclass.FIELD_76,
+            cv_dataclass.FIELD_77,
+            cv_dataclass.FIELD_78,
+            cv_dataclass.FIELD_79,
+            cv_dataclass.FIELD_80,
+            cv_dataclass.FIELD_81,
+            cv_dataclass.FIELD_82,
+            cv_dataclass.FIELD_83,
+            cv_dataclass.FIELD_84,
+            cv_dataclass.FIELD_85,
+            cv_dataclass.FIELD_86,
+            cv_dataclass.FIELD_87,
+            cv_dataclass.FIELD_88,
+            cv_dataclass.FIELD_89,
+            cv_dataclass.FIELD_90,
+            cv_dataclass.FIELD_91,
+            cv_dataclass.FIELD_92,
+            cv_dataclass.FIELD_93,
+            cv_dataclass.FIELD_94,
+            cv_dataclass.FIELD_95,
+            cv_dataclass.FIELD_96,
+            cv_dataclass.FIELD_97,
+            cv_dataclass.FIELD_98,
+            cv_dataclass.FIELD_99,
+            cv_dataclass.FIELD_100,
+            cv_dataclass.FIELD_101,
+            cv_dataclass.FIELD_102,
+            cv_dataclass.FIELD_103,
+            cv_dataclass.FIELD_104,
+            cv_dataclass.FIELD_105,
+            cv_dataclass.FIELD_106,
+            cv_dataclass.FIELD_107,
+            cv_dataclass.FIELD_108,
+            cv_dataclass.FIELD_109,
+            cv_dataclass.FIELD_110,
+            cv_dataclass.FIELD_111,
+            cv_dataclass.FIELD_112,
+            cv_dataclass.FIELD_113,
+            cv_dataclass.FIELD_114,
+            cv_dataclass.FIELD_115,
+            cv_dataclass.FIELD_116,
+            cv_dataclass.FIELD_117,
+            cv_dataclass.FIELD_118,
+            cv_dataclass.FIELD_119,
+            cv_dataclass.FIELD_120,
+            cv_dataclass.FIELD_121,
+            cv_dataclass.FIELD_122,
+            cv_dataclass.FIELD_123,
+            cv_dataclass.FIELD_124,
+            cv_dataclass.FIELD_125,
+            cv_dataclass.FIELD_126,
+            cv_dataclass.FIELD_127,
+        )
+    )
+
+
+def retrieve_cv_slotted_dataclass_direct_15(_start, _n_slots):
+    return (
+        cv_slotted_dataclass.FIELD_0
+        + cv_slotted_dataclass.FIELD_1
+        + cv_slotted_dataclass.FIELD_2
+        + cv_slotted_dataclass.FIELD_3
+        + cv_slotted_dataclass.FIELD_4
+        + cv_slotted_dataclass.FIELD_5
+        + cv_slotted_dataclass.FIELD_6
+        + cv_slotted_dataclass.FIELD_7
+        + cv_slotted_dataclass.FIELD_8
+        + cv_slotted_dataclass.FIELD_9
+        + cv_slotted_dataclass.FIELD_10
+        + cv_slotted_dataclass.FIELD_11
+        + cv_slotted_dataclass.FIELD_12
+        + cv_slotted_dataclass.FIELD_13
+        + cv_slotted_dataclass.FIELD_14
+    )
+
+
+def retrieve_cv_slotted_dataclass_direct_20(_start, _n_slots):
+    return (
+        cv_slotted_dataclass.FIELD_0
+        + cv_slotted_dataclass.FIELD_1
+        + cv_slotted_dataclass.FIELD_2
+        + cv_slotted_dataclass.FIELD_3
+        + cv_slotted_dataclass.FIELD_4
+        + cv_slotted_dataclass.FIELD_5
+        + cv_slotted_dataclass.FIELD_6
+        + cv_slotted_dataclass.FIELD_7
+        + cv_slotted_dataclass.FIELD_8
+        + cv_slotted_dataclass.FIELD_9
+        + cv_slotted_dataclass.FIELD_10
+        + cv_slotted_dataclass.FIELD_11
+        + cv_slotted_dataclass.FIELD_12
+        + cv_slotted_dataclass.FIELD_13
+        + cv_slotted_dataclass.FIELD_14
+        + cv_slotted_dataclass.FIELD_15
+        + cv_slotted_dataclass.FIELD_16
+        + cv_slotted_dataclass.FIELD_17
+        + cv_slotted_dataclass.FIELD_18
+        + cv_slotted_dataclass.FIELD_19
+    )
+
+
+def retrieve_cv_slotted_dataclass_direct_128(_start, _n_slots):
+    return sum(
+        (
+            cv_slotted_dataclass.FIELD_0,
+            cv_slotted_dataclass.FIELD_1,
+            cv_slotted_dataclass.FIELD_2,
+            cv_slotted_dataclass.FIELD_3,
+            cv_slotted_dataclass.FIELD_4,
+            cv_slotted_dataclass.FIELD_5,
+            cv_slotted_dataclass.FIELD_6,
+            cv_slotted_dataclass.FIELD_7,
+            cv_slotted_dataclass.FIELD_8,
+            cv_slotted_dataclass.FIELD_9,
+            cv_slotted_dataclass.FIELD_10,
+            cv_slotted_dataclass.FIELD_11,
+            cv_slotted_dataclass.FIELD_12,
+            cv_slotted_dataclass.FIELD_13,
+            cv_slotted_dataclass.FIELD_14,
+            cv_slotted_dataclass.FIELD_15,
+            cv_slotted_dataclass.FIELD_16,
+            cv_slotted_dataclass.FIELD_17,
+            cv_slotted_dataclass.FIELD_18,
+            cv_slotted_dataclass.FIELD_19,
+            cv_slotted_dataclass.FIELD_20,
+            cv_slotted_dataclass.FIELD_21,
+            cv_slotted_dataclass.FIELD_22,
+            cv_slotted_dataclass.FIELD_23,
+            cv_slotted_dataclass.FIELD_24,
+            cv_slotted_dataclass.FIELD_25,
+            cv_slotted_dataclass.FIELD_26,
+            cv_slotted_dataclass.FIELD_27,
+            cv_slotted_dataclass.FIELD_28,
+            cv_slotted_dataclass.FIELD_29,
+            cv_slotted_dataclass.FIELD_30,
+            cv_slotted_dataclass.FIELD_31,
+            cv_slotted_dataclass.FIELD_32,
+            cv_slotted_dataclass.FIELD_33,
+            cv_slotted_dataclass.FIELD_34,
+            cv_slotted_dataclass.FIELD_35,
+            cv_slotted_dataclass.FIELD_36,
+            cv_slotted_dataclass.FIELD_37,
+            cv_slotted_dataclass.FIELD_38,
+            cv_slotted_dataclass.FIELD_39,
+            cv_slotted_dataclass.FIELD_40,
+            cv_slotted_dataclass.FIELD_41,
+            cv_slotted_dataclass.FIELD_42,
+            cv_slotted_dataclass.FIELD_43,
+            cv_slotted_dataclass.FIELD_44,
+            cv_slotted_dataclass.FIELD_45,
+            cv_slotted_dataclass.FIELD_46,
+            cv_slotted_dataclass.FIELD_47,
+            cv_slotted_dataclass.FIELD_48,
+            cv_slotted_dataclass.FIELD_49,
+            cv_slotted_dataclass.FIELD_50,
+            cv_slotted_dataclass.FIELD_51,
+            cv_slotted_dataclass.FIELD_52,
+            cv_slotted_dataclass.FIELD_53,
+            cv_slotted_dataclass.FIELD_54,
+            cv_slotted_dataclass.FIELD_55,
+            cv_slotted_dataclass.FIELD_56,
+            cv_slotted_dataclass.FIELD_57,
+            cv_slotted_dataclass.FIELD_58,
+            cv_slotted_dataclass.FIELD_59,
+            cv_slotted_dataclass.FIELD_60,
+            cv_slotted_dataclass.FIELD_61,
+            cv_slotted_dataclass.FIELD_62,
+            cv_slotted_dataclass.FIELD_63,
+            cv_slotted_dataclass.FIELD_64,
+            cv_slotted_dataclass.FIELD_65,
+            cv_slotted_dataclass.FIELD_66,
+            cv_slotted_dataclass.FIELD_67,
+            cv_slotted_dataclass.FIELD_68,
+            cv_slotted_dataclass.FIELD_69,
+            cv_slotted_dataclass.FIELD_70,
+            cv_slotted_dataclass.FIELD_71,
+            cv_slotted_dataclass.FIELD_72,
+            cv_slotted_dataclass.FIELD_73,
+            cv_slotted_dataclass.FIELD_74,
+            cv_slotted_dataclass.FIELD_75,
+            cv_slotted_dataclass.FIELD_76,
+            cv_slotted_dataclass.FIELD_77,
+            cv_slotted_dataclass.FIELD_78,
+            cv_slotted_dataclass.FIELD_79,
+            cv_slotted_dataclass.FIELD_80,
+            cv_slotted_dataclass.FIELD_81,
+            cv_slotted_dataclass.FIELD_82,
+            cv_slotted_dataclass.FIELD_83,
+            cv_slotted_dataclass.FIELD_84,
+            cv_slotted_dataclass.FIELD_85,
+            cv_slotted_dataclass.FIELD_86,
+            cv_slotted_dataclass.FIELD_87,
+            cv_slotted_dataclass.FIELD_88,
+            cv_slotted_dataclass.FIELD_89,
+            cv_slotted_dataclass.FIELD_90,
+            cv_slotted_dataclass.FIELD_91,
+            cv_slotted_dataclass.FIELD_92,
+            cv_slotted_dataclass.FIELD_93,
+            cv_slotted_dataclass.FIELD_94,
+            cv_slotted_dataclass.FIELD_95,
+            cv_slotted_dataclass.FIELD_96,
+            cv_slotted_dataclass.FIELD_97,
+            cv_slotted_dataclass.FIELD_98,
+            cv_slotted_dataclass.FIELD_99,
+            cv_slotted_dataclass.FIELD_100,
+            cv_slotted_dataclass.FIELD_101,
+            cv_slotted_dataclass.FIELD_102,
+            cv_slotted_dataclass.FIELD_103,
+            cv_slotted_dataclass.FIELD_104,
+            cv_slotted_dataclass.FIELD_105,
+            cv_slotted_dataclass.FIELD_106,
+            cv_slotted_dataclass.FIELD_107,
+            cv_slotted_dataclass.FIELD_108,
+            cv_slotted_dataclass.FIELD_109,
+            cv_slotted_dataclass.FIELD_110,
+            cv_slotted_dataclass.FIELD_111,
+            cv_slotted_dataclass.FIELD_112,
+            cv_slotted_dataclass.FIELD_113,
+            cv_slotted_dataclass.FIELD_114,
+            cv_slotted_dataclass.FIELD_115,
+            cv_slotted_dataclass.FIELD_116,
+            cv_slotted_dataclass.FIELD_117,
+            cv_slotted_dataclass.FIELD_118,
+            cv_slotted_dataclass.FIELD_119,
+            cv_slotted_dataclass.FIELD_120,
+            cv_slotted_dataclass.FIELD_121,
+            cv_slotted_dataclass.FIELD_122,
+            cv_slotted_dataclass.FIELD_123,
+            cv_slotted_dataclass.FIELD_124,
+            cv_slotted_dataclass.FIELD_125,
+            cv_slotted_dataclass.FIELD_126,
+            cv_slotted_dataclass.FIELD_127,
         )
     )
 
@@ -1557,6 +2194,14 @@ DIRECT_METHODS = {
         (
             "IntEnum + direct names",
             globals()[f"retrieve_intenum_direct_{n_slots}"],
+        ),
+        (
+            "dataclass + direct names",
+            globals()[f"retrieve_cv_dataclass_direct_{n_slots}"],
+        ),
+        (
+            "slotted dataclass + direct names",
+            globals()[f"retrieve_cv_slotted_dataclass_direct_{n_slots}"],
         ),
     )
     for n_slots in DIRECT_SIZES
