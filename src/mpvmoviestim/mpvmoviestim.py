@@ -539,7 +539,7 @@ class MpvMoviestim:
         # TODO: advanced_control=self._advanced_control,
 
     @staticmethod
-    def _bounding_rect(
+    def _calculate_draw_rect(
         size: tuple[float, float] | None,
         media_size: tuple[float, float] | None,
         position: tuple[float, float],
@@ -565,12 +565,10 @@ class MpvMoviestim:
 
         if size is None and media_size is None:
             logging.info(
-                "Size not specified and media size not available yet, not updating bounding rect."
+                "Draw size not specified and media size not available yet,"
+                "cannot calculate draw rect."
             )
             return None
-        # The above guard is supposed to prevent both media size and size being None at the same time,
-        # but type checkers don't seem to understand this logic, so additional asserts were needed
-        # below to silence errors.
 
         screen_centre_px: tuple[int, int] = (
             window.size[0] / 2,
@@ -580,9 +578,9 @@ class MpvMoviestim:
         # if units are not pix, convert to pixels what's necessary
         if window.units != "pix":
             if size is not None:
-                # if display size is provided, calculate bounding rect directly
-                # get vectors from screen centre to bottom-left/top-right of media in pixels
-                # we directly calculate corner positions to allow for non-rectangular units
+                # If display size is provided, calculate bounding rect from it.
+                # Get vectors from screen centre to bottom-left/top-right of media in pixels.
+                # We directly calculate corner positions to allow for non-rectangular units.
                 corners = [
                     (
                         position[0] - size[0] / 2,
@@ -603,7 +601,7 @@ class MpvMoviestim:
                     ),
                 )
             else:
-                assert media_size is not None  # guaranteed, silences errors
+                assert media_size is not None  # guaranteed, silences dumb type checkers
                 # display size not provided, only convert position to px
                 # pos_px: screen centre -> media element centre vector in pixels
                 pos_px: tuple[float, float] = convertToPix(
@@ -629,6 +627,7 @@ class MpvMoviestim:
             )
         else:
             # Everything is in pixels, we only need to decide what display size to use
+            # Why, oh why, is ty thinking that this code is unreachable?
             size_px = size if size is not None else media_size
             assert size_px is not None
             bounding_rect = (
@@ -795,7 +794,7 @@ class MpvMoviestim:
             )
         self._media_size = video_params["w"], video_params["h"]
         if self._draw_rect is None:
-            self._draw_rect = self._bounding_rect(
+            self._draw_rect = self._calculate_draw_rect(
                 self._size, self._media_size, self._position, self._window
             )
         logging.info(f"loadmovie: setting draw rect to: {self._draw_rect}")
