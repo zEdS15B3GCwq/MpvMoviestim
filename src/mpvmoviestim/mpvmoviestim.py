@@ -112,13 +112,13 @@ def _log_pre_post(func: Callable[P, R]) -> Callable[P, R]:
         print(
             f"PRE {func.__name__}: "  # ty: ignore
             f"state={instance._state.name}; "  # pylint: disable=protected-access
-            f"mpv={instance._mpv_state.name}"  # pylint: disable=protected-access
+            f"mpv={instance.mpv_state.name}"  # pylint: disable=protected-access
         )
         result = func(*args, **kwargs)
         print(
             f"POST {func.__name__}: "  # ty: ignore
             f"state={instance._state.name}; "  # pylint: disable=protected-access
-            f"mpv={instance._mpv_state.name}"  # pylint: disable=protected-access
+            f"mpv={instance.mpv_state.name}"  # pylint: disable=protected-access
         )
         return result
 
@@ -348,6 +348,7 @@ class MpvMoviestim:
         volume: float = 1.0,
         pos: tuple[int | float, int | float] = (0, 0),
         size: tuple[int | float, int | float] | None = None,
+        units: str | None = None,
         flip_horiz: bool = False,
         flip_vert: bool = False,
         monitor_framerate: float | None = None,
@@ -358,6 +359,7 @@ class MpvMoviestim:
     ):
         # unspecified - not initialized or unknown state
         self._state = MpvMoviestimState.UNSPECIFIED
+        logging.info("State set to UNSPECIFIED.")
 
         # ******************************************
         # Psychopy and display-related configuration
@@ -365,6 +367,7 @@ class MpvMoviestim:
         self._window = window
         self._size = size
         self._position = pos
+        self._units = units if units is not None else window.units
         self._autostart = autostart
         self.flip_horizontal = flip_horiz
         self.flip_vertical = flip_vert
@@ -437,6 +440,7 @@ class MpvMoviestim:
         # Initialisation done
         # *******************
         self._state = MpvMoviestimState.NO_MEDIA
+        logging.info("State set to NO_MEDIA.")
 
         # load movie if specified
         if file is not None:
@@ -538,37 +542,45 @@ class MpvMoviestim:
         )
         # TODO: advanced_control=self._advanced_control,
 
-    @staticmethod
-    def _calculate_draw_rect(
-        size: tuple[float, float] | None,
-        media_size: tuple[float, float] | None,
-        position: tuple[float, float],
-        window: visual.Window,
-    ) -> tuple[int, int, int, int] | None:
+    def _update_draw_rect(self) -> None:
         """Calculate pixel-based bounding rectangle from Psychopy-based size and position.
 
-        Psychopy's non-pixel units and are centre-based position reference are converted
-        to screen pixels.
+        Psychopy stores position and size in its own units, but we need pixel-based
+        ones for OpenGL rendering. This function calculates the bounding rectangle
+        [x, y, w, h] in pixels, where (x, y) define the bottom-left corner, and
+        (w, h) the display size, and stores it in `self._draw_rect`.
+
+        The draw rect is used in the following places:
+        - Intermediate FBOs are allocated once after loading media, at media size or
+        draw rect size, whichever is larger, to allow resizing during playback up to
+        this allocated size. The draw rect's width and height define the area that's
+        actually used for image data in the intermediate FBOs for rendering and
+        drawing.
+        - Both MPV rendering and drawing to PsychoPy's surface use the same image size
+        (w, h). This means that MPV's superiour scaling algorithms are used to rescale
+        the media instead of doing it with OpenGL's simpler blit.
 
         Notes
         -----
-        - Display bounding rect (x, y, w, h in window pixels) is needed for OpenGL blit.
-        - Position = centre of media element relative to window centre; size = width and height.
-        - Psychopy's window size is in pixels; position and size can be in any Psychopy units.
-        - Units other than pixels are converted using Psychopy's `convertToPix` function.
+        - Psychopy's window size is in pixels; position and size can be in other units.
+        - Non-pixel units are converted using Psychopy's `convertToPix` function.
         - If display size is not given, media size is used if available.
-        - If neither size nor media size are available, None is returned.
+        - If neither size nor media size are available, the draw rect is not updated.
         """
         logging.info(
-            f"_bounding rect params: {size=}, {media_size=}, {position=}, {window=}"
+            f"_bounding rect params: {self._size=}, {self._media_size=}, {self._position=}, {self._window=}, {self._units=}"
         )
+        position = self._position
+        size = self._size
+        media_size = self._media_size
+        window = self._window
 
         if size is None and media_size is None:
-            logging.info(
-                "Draw size not specified and media size not available yet,"
+            logging.warning(
+                "Draw size not specified and media size not available,"
                 "cannot calculate draw rect."
             )
-            return None
+            return
 
         screen_centre_px: tuple[int, int] = (
             window.size[0] / 2,
@@ -576,7 +588,7 @@ class MpvMoviestim:
         )
 
         # if units are not pix, convert to pixels what's necessary
-        if window.units != "pix":
+        if self._units != "pix":
             if size is not None:
                 # If display size is provided, calculate bounding rect from it.
                 # Get vectors from screen centre to bottom-left/top-right of media in pixels.
@@ -596,7 +608,7 @@ class MpvMoviestim:
                     convertToPix(
                         pos=[0, 0],
                         vertices=corners,
-                        units=window.units,
+                        units=self._units,
                         win=window,
                     ),
                 )
@@ -607,7 +619,7 @@ class MpvMoviestim:
                 pos_px: tuple[float, float] = convertToPix(
                     pos=[0, 0],
                     vertices=[position],
-                    units=window.units,
+                    units=self._units,
                     win=window,
                 )[0]
                 bottom_left_px = (
@@ -627,7 +639,6 @@ class MpvMoviestim:
             )
         else:
             # Everything is in pixels, we only need to decide what display size to use
-            # Why, oh why, is ty thinking that this code is unreachable?
             size_px = size if size is not None else media_size
             assert size_px is not None
             bounding_rect = (
@@ -636,7 +647,9 @@ class MpvMoviestim:
                 int(size_px[0]),
                 int(size_px[1]),
             )
-        return bounding_rect
+
+        logging.info(f"New draw rect: {self._draw_rect}.")
+        self._draw_rect = bounding_rect
 
     def _allocate_intermediate_fbo(self) -> tuple[dict[str, int], int]:
         """Allocate one intermediate FBO + backing texture on the current GL context.
@@ -655,8 +668,8 @@ class MpvMoviestim:
         The largest expected size is determined as the larger one of the screen
         size and the user-indicated display size, if any. Display sizes larger
         than the screen can be useful to show an enlarged portion of the video,
-        and the keeping the screen size as a minimum allows the video to be
-        resized up to the screen size, to maintain some degree of flexibility.
+        and keeping the screen size as a minimum allows the video to be resized
+        up to the screen size, to maintain some degree of flexibility.
 
         In double-buffered (threaded) mode, the worker thread creates and owns
         the allocated FBO and texture resources. The thread's GL context (shadow
@@ -679,7 +692,7 @@ class MpvMoviestim:
             self._draw_rect[3] if self._draw_rect is not None else 0,
         )
 
-        # use Psychopy's pixel format or fallback to default if not available
+        # use Psychopy's pixel format or fallback to defaults if not available
         internal_format = self._target_fbo_info.get(
             "internal_format", gl.GL_RGB32F if self._window.useFBO else gl.GL_RGB8
         )
@@ -749,28 +762,21 @@ class MpvMoviestim:
             Path to the movie file to load.
 
         """
-        # TODO figure out: how to implement autoStart, can pause=True be set here?
         # TODO make this work repeatedly
+
+        # check if file exists then load it into MPV
         if isinstance(file, str):
             file = Path(file)
         file = file.resolve()
         if not file.exists():
             logging.error(f"File '{file}' does not exist.")
             raise FileNotFoundError(f"File '{file}' does not exist.")
-        # self._player.loadfile(
-        #     filename=str(file), mode="replace", pause=not self._autostart
-        # )
-        # if self._autostart:
-        #     if block:
-        #         self._player.wait_until_playing()
-        #     self._player_state = MpvState.PLAYING
-        # else:
-        #     if block:
-        #         self._player.wait_until_paused()
-        #     self._player_state = MpvState.PAUSED
         logging.exp("Loading movie file")
         self._player.loadfile(filename=str(file), mode="replace")
         self._loaded_movie = file
+
+        # MPV options specify paused at start, so wait for that,
+        # then set our state to PAUSED
         logging.exp("waiting until paused")
         try:
             self._player.wait_until_paused(timeout=TIMEOUT_DEFAULT_S)
@@ -779,7 +785,9 @@ class MpvMoviestim:
                 "An error occurred while waiting for MPV to reach a paused state."
             ) from e
         self._state = MpvMoviestimState.PAUSED
+        logging.info("State set to PAUSED.")
 
+        # wait for MPV to provide video parameters in order to get height, width, etc.
         logging.exp("waiting for video params property")
         try:
             self._player.wait_for_property("video-params", timeout=TIMEOUT_DEFAULT_S)
@@ -793,14 +801,13 @@ class MpvMoviestim:
                 "MPV did not provide video parameters in the expected format."
             )
         self._media_size = video_params["w"], video_params["h"]
-        if self._draw_rect is None:
-            self._draw_rect = self._calculate_draw_rect(
-                self._size, self._media_size, self._position, self._window
-            )
-        logging.info(f"loadmovie: setting draw rect to: {self._draw_rect}")
 
-        logging.exp(f"Loaded movie '{file}' with autostart set to {self._autostart}.")
+        # update pixel-based draw rect
+        self._update_draw_rect()
+
+        logging.exp(f"Loaded movie '{file}'.")
         if self._autostart:
+            logging.exp("Autostart is enabled, starting playback.")
             self.play()
 
     def load(self, fileName: Path | str) -> None:
@@ -811,7 +818,6 @@ class MpvMoviestim:
     @_state_guard(allowed_state=MpvMoviestimState.PAUSED)
     def play(self, block: bool = False) -> None:
         # TODO: threading state needs to be reset on play() following stop() or loadMovie()
-        # self._report_swap = False
         self._player.pause = False
         if block:
             try:
@@ -823,7 +829,7 @@ class MpvMoviestim:
         self._state = MpvMoviestimState.PLAYING
         logging.exp(
             "State change: PAUSED -> PLAYING"
-            f"(self state={self._state.name}, MPV state={self._mpv_state.name})"
+            f"(self state={self._state.name}, MPV state={self.mpv_state.name})"
         )
 
     @_log_pre_post
@@ -840,7 +846,7 @@ class MpvMoviestim:
         self._state = MpvMoviestimState.PAUSED
         logging.exp(
             "State change: PLAYING -> PAUSED"
-            f"(self state={self._state.name}, MPV state={self._mpv_state.name})"
+            f"(self state={self._state.name}, MPV state={self.mpv_state.name})"
         )
 
     @_log_pre_post
@@ -947,7 +953,6 @@ class MpvMoviestim:
             )
         st = self._render_context
         mpv_render_ctx = st.mpv_render_ctx
-        # TODO: we need an intermediate FBO to be able to resize the video!
 
         # call update just to flush messages
         if mpv_render_ctx.update():
@@ -957,9 +962,18 @@ class MpvMoviestim:
             viewport = (ctypes.c_int * 4)()
             gl.glGetIntegerv(gl.GL_VIEWPORT, viewport)
 
+            # in order to scale MPV render size to draw_rect dimensions,
+            # set the FBO dimensions to match the draw_rect
+            if self._draw_rect is None:
+                raise RuntimeError("Draw rectangle is not defined.")
+            scaled_FBO_info = st.intermediate_FBO_info | {
+                "w": self._draw_rect[2],
+                "h": self._draw_rect[3],
+            }
+
             # render vframe into buffer
             mpv_render_ctx.render(
-                opengl_fbo=st.intermediate_FBO_info,
+                opengl_fbo=scaled_FBO_info,
                 flip_y=True,
                 block_for_target_time=False,
             )
@@ -1005,7 +1019,7 @@ class MpvMoviestim:
         return self._state
 
     @property
-    def _mpv_state(self) -> MpvMoviestimState:  # noqa: PLR0911
+    def mpv_state(self) -> MpvMoviestimState:  # noqa: PLR0911
         # TODO: test
         if not hasattr(self, "_player") or self._player is None:
             return MpvMoviestimState.UNSPECIFIED
@@ -1015,11 +1029,43 @@ class MpvMoviestim:
             return MpvMoviestimState.PAUSED
         if self._player.idle_active:
             return MpvMoviestimState.NO_MEDIA
-        if not self._player.core_idle:
-            return MpvMoviestimState.PLAYING
         if self._player.eof_reached:
             return MpvMoviestimState.EOF_REACHED
+        if not self._player.core_idle:
+            return MpvMoviestimState.PLAYING
         return MpvMoviestimState.UNSPECIFIED
+
+    @property
+    def size(self) -> tuple[float, float] | None:
+        """User-requested display size of the stimulus in PsychoPy units.
+
+        Returns None if user did not set a desired display size. In that
+        case, the stimulus will be drawn at the media's native size.
+        """
+        return self._size
+
+    @size.setter
+    def _set_size(self, new_size: tuple[float, float]) -> None:
+        """Set the user-requested display size of the stimulus in PsychoPy units.
+
+        Parameters
+        ----------
+        new_size : tuple[float, float]
+            New display size in PsychoPy units.
+
+        Notes
+        -----
+        - This function does not resize the intermediate FBOs, which are
+          allocated once at the beginning at the largest expected size.
+          Resizing during playback is allowed, as long as the new size is
+          equal or smaller than the initially allocated size. For the MPV
+          rendering step, resizing only means that the FBO may not be fully
+          used.
+        - The draw rectangle is updated to reflect the new size.
+        """
+        # TODO: check docstr, check upper size limit
+        self._size = new_size
+        self._update_draw_rect()
 
     def _mpv_update_callback(self) -> None:
         """Called by MPV when a new frame may be ready.
@@ -1228,6 +1274,12 @@ class MpvMoviestim:
                 target_idx = ts.worker_fbo_idx
 
             fbo_info = ts.intermediate_fbo_infos[target_idx]
+            if self._draw_rect is None:
+                raise RuntimeError("Draw rectangle is not defined.")
+            scaled_fbo_info = fbo_info | {
+                "w": self._draw_rect[2],
+                "h": self._draw_rect[3],
+            }
 
             # The GPU may be still executing the main thread's blit from this FBO,
             # so we do a GPU-side wait before we overwrite it.
@@ -1237,7 +1289,7 @@ class MpvMoviestim:
                 ts.blit_fences[target_idx] = None
 
             mpv_render_ctx.render(
-                opengl_fbo=fbo_info,
+                opengl_fbo=scaled_fbo_info,
                 flip_y=True,
                 block_for_target_time=False,
             )
