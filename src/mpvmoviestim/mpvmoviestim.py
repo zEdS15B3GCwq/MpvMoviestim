@@ -219,7 +219,7 @@ class NonThreadedState:
 
     c_getproc: ctypes._CFunctionType
     mpv_render_ctx: mpv.MpvRenderContext
-    allocated_FBO_size: tuple[int, int]
+    FBO_allocated_size: tuple[int, int]
     intermediate_FBO_info: dict[str, int]  # mpv.MpvOpenGLFBO
     intermediate_tex_id: int
 
@@ -292,7 +292,7 @@ class ThreadedState:
     # Double buffering
     intermediate_fbo_infos: tuple[dict[str, int], dict[str, int]] | None = None
     intermediate_fbo_textures: tuple[int, int] | None = None
-    allocated_FBO_size: tuple[int, int] | None = None
+    FBO_allocated_size: tuple[int, int] | None = None
     present_fbo_idx: int = -1
     worker_fbo_idx: int = 0
 
@@ -522,7 +522,7 @@ class MpvMoviestim:
             mpv_render_ctx=mpv_render_ctx,
             intermediate_FBO_info=fbo,
             intermediate_tex_id=tex,
-            allocated_FBO_size=(fbo["w"], fbo["h"]),
+            FBO_allocated_size=(fbo["w"], fbo["h"]),
         )
 
     @_log_pre_post
@@ -1039,7 +1039,7 @@ class MpvMoviestim:
         return MpvMoviestimState.UNSPECIFIED
 
     @property
-    def size(self) -> tuple[float, float] | None:
+    def size(self) -> tuple[float | int, float | int] | None:
         """User-requested display size of the stimulus in PsychoPy units.
 
         Returns None if user did not set a desired display size. In that
@@ -1048,17 +1048,22 @@ class MpvMoviestim:
         return self._size
 
     @size.setter
-    def size(self, new_size: tuple[float, float]) -> None:
+    def size(self, new_size: tuple[float | int, float | int]) -> None:
         """Set the user-requested display size of the stimulus in PsychoPy units.
 
         Parameters
         ----------
-        new_size : tuple[float, float]
-            New display size in PsychoPy units.
+        new_size : tuple[float | int, float | int]
+            New display size in the movie element's display units.
 
         Notes
         -----
-        - This function does not resize the intermediate FBOs, which are
+        - Resizing is allowed at any time after initialisation, however,
+        resizing after loading the media has a maximum size limit that is
+        set when during the loading process.
+        - Resizing before loading the media affects the size limit.
+
+        This function does not resize the intermediate FBOs, which are
           allocated once at the beginning at the largest expected size.
           Resizing during playback is allowed, as long as the new size is
           equal or smaller than the initially allocated size. For the MPV
@@ -1239,7 +1244,7 @@ class MpvMoviestim:
             tex1,
             tex2,
         )
-        ts.allocated_FBO_size = (fbo1["w"], fbo1["h"])
+        ts.FBO_allocated_size = (fbo1["w"], fbo1["h"])
 
         # set initial buffer indices
         ts.worker_fbo_idx = 0
