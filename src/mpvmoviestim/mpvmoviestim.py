@@ -219,6 +219,7 @@ class NonThreadedState:
 
     c_getproc: ctypes._CFunctionType
     mpv_render_ctx: mpv.MpvRenderContext
+    allocated_FBO_size: tuple[int, int]
     intermediate_FBO_info: dict[str, int]  # mpv.MpvOpenGLFBO
     intermediate_tex_id: int
 
@@ -284,13 +285,14 @@ class ThreadedState:
 
     # Core objects
     c_getproc: ctypes._CFunctionType
-    mpv_render_ctx: mpv.MpvRenderContext | None
     worker_thread: threading.Thread
     shadow_window: BaseWindow
+    mpv_render_ctx: mpv.MpvRenderContext | None = None
 
     # Double buffering
     intermediate_fbo_infos: tuple[dict[str, int], dict[str, int]] | None = None
     intermediate_fbo_textures: tuple[int, int] | None = None
+    allocated_FBO_size: tuple[int, int] | None = None
     present_fbo_idx: int = -1
     worker_fbo_idx: int = 0
 
@@ -520,6 +522,7 @@ class MpvMoviestim:
             mpv_render_ctx=mpv_render_ctx,
             intermediate_FBO_info=fbo,
             intermediate_tex_id=tex,
+            allocated_FBO_size=(fbo["w"], fbo["h"]),
         )
 
     @_log_pre_post
@@ -1045,7 +1048,7 @@ class MpvMoviestim:
         return self._size
 
     @size.setter
-    def _set_size(self, new_size: tuple[float, float]) -> None:
+    def size(self, new_size: tuple[float, float]) -> None:
         """Set the user-requested display size of the stimulus in PsychoPy units.
 
         Parameters
@@ -1134,7 +1137,6 @@ class MpvMoviestim:
             worker_thread=worker_thread,
             shadow_window=shadow_window,
             c_getproc=c_getproc,
-            mpv_render_ctx=None,
         )
 
         logging.info("Starting renderer worker thread.")
@@ -1237,6 +1239,7 @@ class MpvMoviestim:
             tex1,
             tex2,
         )
+        ts.allocated_FBO_size = (fbo1["w"], fbo1["h"])
 
         # set initial buffer indices
         ts.worker_fbo_idx = 0
