@@ -1062,6 +1062,9 @@ class MpvMoviestim:
         resizing after loading the media has a maximum size limit that is
         set when during the loading process.
         - Resizing before loading the media affects the size limit.
+        - The size limit is set to the largest of the screen size, the
+        media size and the user-requested display size. The loading
+        process allocates display buffers at this size
 
         This function does not resize the intermediate FBOs, which are
           allocated once at the beginning at the largest expected size.
