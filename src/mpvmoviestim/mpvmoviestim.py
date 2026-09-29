@@ -958,13 +958,27 @@ class MpvMoviestim:
             raise TypeError(
                 "Non-threaded draw called but render context is not NonThreadedState."
             )
+
         st = self._render_context
         mpv_render_ctx = st.mpv_render_ctx
 
-        # call update just to flush messages
-        if mpv_render_ctx.update():
-            # mpv._mpv_render_context_get_info(ctx._handle, frameinfo)
+        # render to intermediate buffer if MPV has a new frame ready
+        if st.intermediate_FBO_info is None:
+            if self._draw_rect is not None:
+                # allocate intermediate FBO for rendering
+                fbo_info, tex_id = self._allocate_intermediate_fbo()
+                st.intermediate_FBO_info = fbo_info
+                st.intermediate_tex_id = tex_id
+                st.FBO_allocated_size = (fbo_info["w"], fbo_info["h"])
+            else:
+                logging.warning(
+                    "No buffers to render into and no draw rectangle defined, cannot render."
+                )
+                return
 
+        # mpv._mpv_render_context_get_info(ctx._handle, frameinfo)
+
+        if mpv_render_ctx.update():
             # save viewport info because MPV can change that
             viewport = (ctypes.c_int * 4)()
             gl.glGetIntegerv(gl.GL_VIEWPORT, viewport)
@@ -1062,21 +1076,18 @@ class MpvMoviestim:
 
         Notes
         -----
-        - Resizing is allowed at any time after initialisation, however,
-        resizing after loading the media has a maximum size limit that is
-        set when during the loading process.
-        - Resizing before loading the media affects the size limit.
-        - The size limit is set to the largest of the screen size, the
-        media size and the user-requested display size. The loading
-        process allocates display buffers at this size
-
-        This function does not resize the intermediate FBOs, which are
-          allocated once at the beginning at the largest expected size.
-          Resizing during playback is allowed, as long as the new size is
-          equal or smaller than the initially allocated size. For the MPV
-          rendering step, resizing only means that the FBO may not be fully
-          used.
-        - The draw rectangle is updated to reflect the new size.
+        - Initial buffers are allocated at the time of loading the media,
+        at the size of the media, or the window or the user-requested
+        display size (if any), whichever is largest.
+        - Resizing is allowed at any point after initialisation.
+        - Resizing to a size equal or smaller than the initially allocated
+        size is efficient. Resizing to a larger size incurs a performance
+        penalty, as the buffers need to be reallocated. Warning messages
+        are logged when this happens.
+        - Therefore, if it is expected that the display size could become
+        larger than the native media size or the window's size, it is
+        recommended to pass the largest expected size to the constructor,
+        or set the `size` property to that size before loading the media.
         """
         # TODO: check docstr, check upper size limit
         self._size = new_size
@@ -1256,13 +1267,14 @@ class MpvMoviestim:
                 f"worker - {new_vframe_available=}, {ts.intermediate_fbo_infos=}, {self._draw_rect=}"
             )
 
-            if new_vframe_available:
-                finfo_param = self._mpv_lib.MpvRenderParam("next_frame_info", {})
-                self._mpv_lib._mpv_render_context_get_info(
-                    mpv_render_ctx.handle, finfo_param
-                )
-                finfo = cast(self._mpv_lib.MpvRenderFrameInfo, finfo_param.value)
-                print(f"worker - {finfo=}, {finfo.target_time=}, {finfo.flags=}")
+            # if new_vframe_available:
+            #     # read vframe PTS and flags for debugging
+            #     finfo_param = self._mpv_lib.MpvRenderParam("next_frame_info", {})
+            #     self._mpv_lib._mpv_render_context_get_info(  # pylint: disable=W0212
+            #         mpv_render_ctx.handle, finfo_param
+            #     )
+            #     finfo: mpv.MpvRenderFrameInfo = finfo_param.value
+            #     print(f"worker - {finfo.target_time=}, {finfo.flags=}")
 
             if ts.intermediate_fbo_infos is None and self._draw_rect is not None:
                 print("allocating buffers")
