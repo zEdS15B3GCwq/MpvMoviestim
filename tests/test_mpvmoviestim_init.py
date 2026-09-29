@@ -21,7 +21,7 @@ def init_pp() -> visual.Window:
     print("creating pp window")
     win = visual.Window(
         size=list(WIN_SIZE),
-        fullscr=True,
+        fullscr=False,
         useFBO=False,  # test both
         waitBlanking=WAIT_BLANK,
         units="pix",

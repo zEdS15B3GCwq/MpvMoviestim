@@ -219,9 +219,9 @@ class NonThreadedState:
 
     c_getproc: ctypes._CFunctionType
     mpv_render_ctx: mpv.MpvRenderContext
-    FBO_allocated_size: tuple[int, int]
-    intermediate_FBO_info: dict[str, int]  # mpv.MpvOpenGLFBO
-    intermediate_tex_id: int
+    intermediate_FBO_info: dict[str, int] | None = None  # mpv.MpvOpenGLFBO
+    intermediate_tex_id: int | None = None
+    FBO_allocated_size: tuple[int, int] | None = None
 
 
 @dataclasses.dataclass(slots=True)
@@ -334,7 +334,7 @@ class MpvMoviestim:
     # Core
     _state: MpvMoviestimState
     _threaded_mode: bool
-    _render_context: ThreadedState | NonThreadedState
+    _render_context: ThreadedState | NonThreadedState | None
     _mpv_lib: ModuleType
     _player: mpv.MPV
     # TODO: _advanced_control: bool
@@ -374,6 +374,7 @@ class MpvMoviestim:
         self.flip_horizontal = flip_horiz
         self.flip_vertical = flip_vert
         self._media_size = None
+        self._draw_rect = None
 
         # infer FBO information (size, pixel format) for the PsychoPy window
         # Resizing controls for the PP window are disabled so target FBO size
@@ -433,10 +434,10 @@ class MpvMoviestim:
         self._threaded_mode = double_buffering
         if self._threaded_mode:
             # threaded, double-buffered drawing mode
-            self._render_context = self._init_threaded_mode()
+            self._init_threaded_mode()
         else:
             # single-threaded, direct draw mode
-            self._render_context = self._init_nonthreaded_mode()
+            self._init_nonthreaded_mode()
 
         # *******************
         # Initialisation done
@@ -493,7 +494,7 @@ class MpvMoviestim:
 
     @_log_pre_post
     @_state_guard(allowed_state=MpvMoviestimState.UNSPECIFIED)
-    def _init_nonthreaded_mode(self) -> NonThreadedState:
+    def _init_nonthreaded_mode(self) -> None:
         """Initialise single-threaded, immediate draw mode.
 
         This function creates the MPV render context on the main thread,
@@ -515,14 +516,15 @@ class MpvMoviestim:
         mpv_render_ctx.update_cb = self._mpv_update_callback
 
         # allocate an intermediate FBO for rendering
-        fbo, tex = self._allocate_intermediate_fbo()
+        # fbo, tex = self._allocate_intermediate_fbo()
+        # TODO: cannot do this until movie is loaded, otherwise no draw_rect!
 
-        return NonThreadedState(
+        self._render_context = NonThreadedState(
             c_getproc=c_getproc,
             mpv_render_ctx=mpv_render_ctx,
-            intermediate_FBO_info=fbo,
-            intermediate_tex_id=tex,
-            FBO_allocated_size=(fbo["w"], fbo["h"]),
+            # intermediate_FBO_info=fbo,
+            # intermediate_tex_id=tex,
+            # FBO_allocated_size=(fbo["w"], fbo["h"]),
         )
 
     @_log_pre_post
@@ -807,8 +809,10 @@ class MpvMoviestim:
 
         # update pixel-based draw rect
         self._update_draw_rect()
+        # TODO: self._allocate_buffers()
 
         logging.exp(f"Loaded movie '{file}'.")
+
         if self._autostart:
             logging.exp("Autostart is enabled, starting playback.")
             self.play()
@@ -1100,10 +1104,13 @@ class MpvMoviestim:
         "render" thread, which in our case means the worker thread.
         """
         if isinstance(self._render_context, ThreadedState):
+            print("threaded callback")
             ts = self._render_context
             worker_wakeup_already_triggered = ts.wakeup_worker_trigger.is_set()
             if not worker_wakeup_already_triggered:
                 ts.wakeup_worker_trigger.set()
+        else:
+            print("non-threaded callback")
 
     # ------------------------------------------------------------------
     # Threaded mode
@@ -1111,7 +1118,7 @@ class MpvMoviestim:
 
     @_log_pre_post
     @_state_guard(allowed_state=MpvMoviestimState.UNSPECIFIED)
-    def _init_threaded_mode(self) -> ThreadedState:
+    def _init_threaded_mode(self) -> None:
         """Initialise threaded, double-buffered drawing mode.
 
         This function takes steps necessary to launch the worker thread,
@@ -1141,23 +1148,22 @@ class MpvMoviestim:
         )
 
         logging.info("Creating shared thread state.")
-        render_context = ThreadedState(
+        self._render_context = ThreadedState(
             worker_thread=worker_thread,
             shadow_window=shadow_window,
             c_getproc=c_getproc,
         )
 
         logging.info("Starting renderer worker thread.")
-        render_context.worker_thread.start()
+        self._render_context.worker_thread.start()
+        # TODO: cannot start this until movie is loaded, otherwise no draw_rect!
 
         logging.info("Waiting for worker thread to initialise.")
-        if not render_context.worker_init_done.wait(timeout=TIMEOUT_DEFAULT_S):
+        if not self._render_context.worker_init_done.wait(timeout=TIMEOUT_DEFAULT_S):
             raise TimeoutError(
                 "Timed out waiting for render worker thread to initialise."
             )
         logging.info("Finished waiting for worker thread.")
-
-        return render_context
 
     def _render_worker(self) -> None:
         # pylint: disable=attribute-defined-outside-init
@@ -1236,32 +1242,46 @@ class MpvMoviestim:
         mpv_render_ctx.update_cb = self._mpv_update_callback
         ts.mpv_render_ctx = mpv_render_ctx
 
-        # allocate intermediate FBOs for double buffering
-        fbo1, tex1 = self._allocate_intermediate_fbo()
-        fbo2, tex2 = self._allocate_intermediate_fbo()
-        ts.intermediate_fbo_infos = (
-            fbo1,
-            fbo2,
-        )
-        ts.intermediate_fbo_textures = (
-            tex1,
-            tex2,
-        )
-        ts.FBO_allocated_size = (fbo1["w"], fbo1["h"])
-
-        # set initial buffer indices
-        ts.worker_fbo_idx = 0
-        ts.present_fbo_idx = -1  # no frame ready yet
-
         ts.worker_init_done.set()  # unblock main thread
 
         # --- render loop ---
         while True:
             ts.wakeup_worker_trigger.wait()  # wait until MPV calls the update callback
             ts.wakeup_worker_trigger.clear()
+            print("worker thread woke up")
 
             # drain pending MPV updates, remember whether there's a new vframe ready
             new_vframe_available: bool = mpv_render_ctx.update()
+            print(
+                f"worker - {new_vframe_available=}, {ts.intermediate_fbo_infos=}, {self._draw_rect=}"
+            )
+
+            if new_vframe_available:
+                finfo_param = self._mpv_lib.MpvRenderParam("next_frame_info", {})
+                self._mpv_lib._mpv_render_context_get_info(
+                    mpv_render_ctx.handle, finfo_param
+                )
+                finfo = cast(self._mpv_lib.MpvRenderFrameInfo, finfo_param.value)
+                print(f"worker - {finfo=}, {finfo.target_time=}, {finfo.flags=}")
+
+            if ts.intermediate_fbo_infos is None and self._draw_rect is not None:
+                print("allocating buffers")
+                # allocate intermediate FBOs for double buffering
+                fbo1, tex1 = self._allocate_intermediate_fbo()
+                fbo2, tex2 = self._allocate_intermediate_fbo()
+                ts.intermediate_fbo_infos = (
+                    fbo1,
+                    fbo2,
+                )
+                ts.intermediate_fbo_textures = (
+                    tex1,
+                    tex2,
+                )
+                ts.FBO_allocated_size = (fbo1["w"], fbo1["h"])
+
+                # set initial buffer indices
+                ts.worker_fbo_idx = 0
+                ts.present_fbo_idx = -1  # no frame ready yet
 
             # if stop is signalled, exit
             # Stop is placed here to ensure updates are drained first
@@ -1271,7 +1291,7 @@ class MpvMoviestim:
 
             # Ignore callbacks when there is no new frame to render
             # (can happen when advanced control is enabled)
-            if not new_vframe_available:
+            if not new_vframe_available or ts.intermediate_fbo_infos is None:
                 continue
 
             # Set busy flag to tell main not to flip buffers while we're rendering.
