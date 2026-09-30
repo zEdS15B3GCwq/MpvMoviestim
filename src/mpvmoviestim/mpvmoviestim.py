@@ -67,6 +67,7 @@ from typing import TYPE_CHECKING, ParamSpec, TypeVar, cast
 import pyglet
 from psychopy import logging, visual
 from psychopy.tools.monitorunittools import convertToPix
+from psychopy.visual.basevisual import BaseVisualStim, ContainerMixin
 from pyglet import gl
 
 from . import utils
@@ -316,7 +317,7 @@ class ThreadedState:
     blit_fences: list[Any] = dataclasses.field(default_factory=lambda: [None, None])
 
 
-class MpvMoviestim:
+class MpvMoviestim(BaseVisualStim, ContainerMixin):
     # TODO: class docstring, w/ Attributes and init Parameters
     # PsychoPy
     _window: visual.Window
