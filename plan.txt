@@ -1,0 +1,107 @@
+User: I've added the BaseVisualStim and ContainerMixin mixin classes to MpvMoviesStim.
+
+1. Not all features are supported, however. As MpvMovieStim (MMS) uses blit to draw the video frame, it cannot support rotation, opacity etc. (or can it? I'm not sure, let me know). Therefore, the methods that conflict with the current operating mode should be overridden. The override for setters should issue a brief logging.warning that the feature is not supported, settings will be ignored, property getters should also warn, and return a default value. The default depends on the property, e.g. "ori" (orientation) should be 0 (unrotated), "opacity" should be 1.0. Most of these values can be inferred from the parent classes' methods in basevisual.py. Check the parent classes for which methods need this treatment.
+2. I want to relegate size handling to mixin classes. Currently, MMS is calculating and keeping track of draw rect, the draw rectangle in pixels that's used for blitting and other steps. However, ContainerMixin's vertexpix already provides this, and it's better to leave the calculation to PsychoPy. I'm concerned about the performance of the parent classes' methods, though. If MMS needs to check vertexpix on each draw/render cycle to see what size MPV should render to the intermediate buffer, and then what size to draw on PsychoPy's buffer, and if vertexpix converts the values each time, that's wasted time. Therefore, I'm considering whether it would be a good idea to override the size and position setters to set a flag that the size or position has changed, invoke super() methods, then update our own draw rect to reflect the changes based on whatever size/pos the parent class has calculated. This way, draw rect provides a quick access and is only updated when there's an actual change. Check parent classes if this is necessary at all.
+3. Consider if it would be safer to note down the size at the time of rendering for each intermediate buffer in the worker thread, so that the same size can be used in the main thread's draw(), even if draw_rect changes in between. I don't want blit to resize the image, let MPV do that on render. Is this feasible/necessary? This one point is just theoretical, no need to plan changes for it.
+
+Inspect parent classes and provide a list of parent properties/methods to override, and what to do with them. Do not plan to touch anything else in MMS (e.g. draw rect handling), I will take care of that.
+
+GitHub Copilot: No matches found. Your search pattern might be excluded completely by either the search.exclude settings or .*ignore files.
+If you believe that it should have results, you can check into the .*ignore files and the exclude setting (here are some excluded patterns for reference:[**/node_modules,**/bower_components,**/*.code-search]).
+Then if you want to include those files you can call the tool again by setting "includeIgnoredFiles" to true.
+
+No matches found. Your search pattern might be excluded completely by either the search.exclude settings or .*ignore files.
+If you believe that it should have results, you can check into the .*ignore files and the exclude setting (here are some excluded patterns for reference:[**/node_modules,**/bower_components,**/*.code-search]).
+Then if you want to include those files you can call the tool again by setting "includeIgnoredFiles" to true.
+
+Searched for files matching `c:/Lib/psychopy/psychopy/layout.py`, no matches
+
+
+Response:
+
+## Plan: Override unsupported PsychoPy parent members in `MpvMoviestim`
+
+I inspected `BaseVisualStim`, `MinimalStim`, `WindowMixin`, `LegacyVisualMixin` and `ContainerMixin`, plus `Vector`/`Vertices` in `psychopy/layout.py` and `Window.flip()`. The overrides split into three groups: unsupported members, supported members that need mapping or change notification, and members to leave alone.
+
+### Can blit support rotation and opacity?
+Not with `glBlitFramebuffer`. It only copies and scales, with no blending and no transform. Both are possible if `draw()` instead drew a textured quad from the intermediate texture with a small shader (alpha, rotation matrix). That is a different draw path, so I treat them as unsupported here.
+
+### Group A: unsupported (warn, ignore, return a default)
+
+| Member | Source | Getter default | Notes |
+|---|---|---|---|
+| `opacity` (property) | `BaseVisualStim` | `1.0` | The parent returns `1` when unset. |
+| `ori` (`attributeSetter`) | `BaseVisualStim` | `0.0` | Never call super. `_rotationMatrix` then stays identity, so `verticesPix` stays axis-aligned and is a valid bounding rect. |
+| `alphaThreshold` (`attributeSetter`) | `BaseVisualStim` | `0.0` | Default taken from its docstring. |
+| `vertices` (setter only) | `WindowMixin` | Delegate quietly to the parent getter | `_updateVertices` reads this getter internally, so a warning there would spam. Arbitrary shapes can't be blitted. |
+| `setOri`, `setOpacity`, `setAlphaThreshold` | `BaseVisualStim` | n/a | `setAttribute` reads the getter first (and `setOpacity('+')` does `self.opacity += ...`), so each call would warn twice. Override them to warn once. |
+
+`updateOpacity()` is already a no-op, so it needs nothing.
+
+### Group B: supported, but needs an override
+
+1. **`flip`, `flipHoriz`, `flipVert`** (`WindowMixin`):
+   - Map them to the existing `flip_horizontal` and `flip_vertical` fields, which blit already supports.
+   - Don't call super, which would create `_vertices` and set `_flip`.
+   - The `flip` getter must return a `(1, 2)` bool array. `vertices` and `_updateVertices` pass it into `Vertices`, which asserts that dtype.
+   - Flipping doesn't change the bounding box, so no refresh is needed.
+2. **`anchor`** (`WindowMixin`):
+   - Call super, then set `_needVertexUpdate = True` and notify MMS.
+   - PsychoPy's setter updates `Vertices.anchor` but never sets the dirty flag, so `verticesPix` goes stale.
+3. **`pos` and `size`** (`WindowMixin`, via `BaseVisualStim`):
+   - Call super, then notify MMS (set a dirty flag, or refresh your draw rect immediately).
+   - `width`, `height`, `setPos`, `setSize` and `_set` all go through these setters, so they are covered automatically.
+   - `size` also needs the `None` semantic. The parent turns `None` into a 1×1 `height`-unit square, not the native media size, so the override has to substitute the media size.
+   - Keep the getter returning the parent's array. `width` and `height` call `.shape` on it.
+
+### Group C: leave as is
+- `win`, `units` (changing units doesn't alter the stored pixel values), `draw` (already overridden), `autoDraw`, `name`, `autoLog`, `status`.
+- `depth` stays, but see the init requirement below.
+- `verticesPix`, `contains()` and `overlaps()` are correct for an axis-aligned rect.
+- The deprecated `_calcSizeRendered`, `_calcPosRendered`, `_getPolyAsRendered` and `_updateList`.
+- `PointerMixin` and `DraggingMixin` aren't inherited, and `Window.flip()` uses `getattr(..., False)` for them.
+
+### Is the flag-and-override idea for question 2 necessary?
+Not for performance, but it is still a good design.
+- **Parent caching:** `Vector` stores `pix` and caches each unit conversion until it is set again. `verticesPix` recomputes only when `_needVertexUpdate` is `True`. Reading it per frame costs a property call, a flag check and a dict lookup. The numpy work (`Vertices.pix`) happens only on a change.
+- **Why override anyway:**
+  - Without it, MMS has no change notification. It would have to poll `_needVertexUpdate`, and `verticesPix` clears that flag when read.
+  - You still need to derive and cache the integer rect once per change.
+  - `anchor` needs the override regardless.
+- **Recommended hooks:** `pos`, `size` and `anchor` setters. Don't hook `units`. Call super first, then read `verticesPix` once.
+
+### Prerequisites in current MMS (clashes, not part of the overrides)
+- MMS never calls `super().__init__(win, units, name, autoLog)`.
+  - That single call initialises `MinimalStim`, `ContainerMixin` and the `win`, `units`, `_pos` and `_size` objects, because the `MinimalStim` init chain reaches `ContainerMixin.__init__`.
+  - Until it is called, `win`, `autoLog`, `_pos`, `_size` and `_rotationMatrix` don't exist.
+- `_size` (tuple or `None`), `_units`, and `_position` clash with the parent's `Size`/`Position` objects. `_updateVertices` reads `self._size` and `self._pos` as `Vector`s.
+- MMS's own `size` property and setter must delegate to the parent instead of replacing it.
+- `autoDraw` needs `self.depth` in the instance `__dict__`. `attributeSetter` has no `__get__`, so otherwise the descriptor object itself is returned. Set `depth` in init.
+- With `autoDraw`, `Window.flip()` calls `draw()` every frame. MMS currently logs a warning each frame when it is not `PLAYING`.
+
+### Question 3: record the render size per buffer (theoretical)
+This is feasible and cheap. It is strictly necessary only if resizing during playback is supported, which the `size` setter docstring says it is.
+- **Current race:** the worker reads `self._draw_rect[2]` and `[3]` in two separate loads, so it can see a torn width/height pair. The main thread blits using whatever `_draw_rect` is at that moment, which may not match what was rendered into that FBO. The result is a rescaled or partially stale blit for the frames around a resize.
+- **Fix:** keep a per-FBO rendered size, e.g. a two-slot list in `ThreadedState`.
+  - The worker snapshots `_draw_rect` once and records `(w, h)` for the target buffer before setting `buffer_flip_required` under `buffer_fbo_lock`. The existing lock and fence give the needed ordering.
+  - The main thread blits the source region `(0, 0, rendered_w, rendered_h)` to a destination of the same size, so blit never scales.
+  - The destination position comes from the current rect (re-centred for the rendered size), so position changes show up immediately without a re-render.
+- **Gotcha:** after a size change, the new size appears only when the worker renders again. When MPV has no new vframe (paused, or a video frame rate below the display rate), nothing triggers it. You would need a resize-pending flag that sets `wakeup_worker_trigger` and makes the worker re-render the current frame even if `update()` returns `False`.
+- **Non-threaded mode:** `_draw_direct` has the same stale-size issue, because it renders only when `update()` is true.
+
+### Decisions
+- Warnings are emitted on every call, as requested, via one shared helper. Warn-once per property would be an easy later change if the logs get noisy.
+- Draw rect handling, init refactoring and the FBO-size tracking are out of scope here.
+
+-------------
+
+1. In case of `units`, verify if chaning units really doesn't change pix values. For example, a norm -> height change or a norm-> pix change; do they alter the requested size of the stim to keep the pix values the same, or does it keep size defined in previous units and match the pix representation?
+2. I assume you also meant that `opacity` setter or getter never should call the super, right? It would prevent setting the field at all, which is OK for super. Same for alphaThreshold.
+3. Can the user set the vertices directly? If so, we need to ensure that only axis-aligned rectangular shapes are accepted. Reading them should be safe, if we cover all paths that could alter orientation.
+4. Even if updateOpacity  is a no-op, we cannot be sure that it stays so in future versions. Also override that, but first check if something important depends on the current state.
+5. What happens when flip flags are set in Psychopy (flipHoriz and Vert), do they update the vertices directly (also changing signs to indicate direction), or is it stored in a flag somewhere, or both? Also, does the OpenGL blit support such coordinates and flips the image accordingly? If the blit supports them, I'll consider updating my code to match this behaviour instead of removing the flip flag handling from Psychopy, but I need to know these behaviours first.
+6. What does `anchor` do?
+7. When pos is set, first call super, then immediately update MMS cached draw rect values. Use this pattern for all updates that affect the draw rect. If there's a chance for a significant performance issue caused by this, inform me.
+8. I'll update the None handling for `size` to reflect PP behaviour and not use media  size. Add a `#TODO` mark where appropriate to remind me to do this.
+9. I'll also update the super().__init__, _units, _size, and _position. I don't need them anyway if the parent classes handle them. Add a #TODO to the init.
+10. I've commented out the previous size property getter/setter. Those were first attempts at doing what we're planning.

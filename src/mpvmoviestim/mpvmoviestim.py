@@ -1057,42 +1057,42 @@ class MpvMoviestim(BaseVisualStim, ContainerMixin):
             return MpvMoviestimState.PLAYING
         return MpvMoviestimState.UNSPECIFIED
 
-    @property
-    def size(self) -> tuple[float | int, float | int] | None:
-        """User-requested display size of the stimulus in PsychoPy units.
+    # @property
+    # def size(self) -> tuple[float | int, float | int] | None:
+    #     """User-requested display size of the stimulus in PsychoPy units.
 
-        Returns None if user did not set a desired display size. In that
-        case, the stimulus will be drawn at the media's native size.
-        """
-        return self._size
+    #     Returns None if user did not set a desired display size. In that
+    #     case, the stimulus will be drawn at the media's native size.
+    #     """
+    #     return self._size
 
-    @size.setter
-    def size(self, new_size: tuple[float | int, float | int]) -> None:
-        """Set the user-requested display size of the stimulus in PsychoPy units.
+    # @size.setter
+    # def size(self, new_size: tuple[float | int, float | int]) -> None:
+    #     """Set the user-requested display size of the stimulus in PsychoPy units.
 
-        Parameters
-        ----------
-        new_size : tuple[float | int, float | int]
-            New display size in the movie element's display units.
+    #     Parameters
+    #     ----------
+    #     new_size : tuple[float | int, float | int]
+    #         New display size in the movie element's display units.
 
-        Notes
-        -----
-        - Initial buffers are allocated at the time of loading the media,
-        at the size of the media, or the window or the user-requested
-        display size (if any), whichever is largest.
-        - Resizing is allowed at any point after initialisation.
-        - Resizing to a size equal or smaller than the initially allocated
-        size is efficient. Resizing to a larger size incurs a performance
-        penalty, as the buffers need to be reallocated. Warning messages
-        are logged when this happens.
-        - Therefore, if it is expected that the display size could become
-        larger than the native media size or the window's size, it is
-        recommended to pass the largest expected size to the constructor,
-        or set the `size` property to that size before loading the media.
-        """
-        # TODO: check docstr, check upper size limit
-        self._size = new_size
-        self._update_draw_rect()
+    #     Notes
+    #     -----
+    #     - Initial buffers are allocated at the time of loading the media,
+    #     at the size of the media, or the window or the user-requested
+    #     display size (if any), whichever is largest.
+    #     - Resizing is allowed at any point after initialisation.
+    #     - Resizing to a size equal or smaller than the initially allocated
+    #     size is efficient. Resizing to a larger size incurs a performance
+    #     penalty, as the buffers need to be reallocated. Warning messages
+    #     are logged when this happens.
+    #     - Therefore, if it is expected that the display size could become
+    #     larger than the native media size or the window's size, it is
+    #     recommended to pass the largest expected size to the constructor,
+    #     or set the `size` property to that size before loading the media.
+    #     """
+    #     # TODO: check docstr, check upper size limit
+    #     self._size = new_size
+    #     self._update_draw_rect()
 
     def _mpv_update_callback(self) -> None:
         """Called by MPV when a new frame may be ready.
