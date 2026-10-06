@@ -38,9 +38,23 @@ def main() -> None:
 
     win = init_pp()
 
-    player = movie.MpvMoviestim(win, file)
+    player = movie.MpvMoviestim(win, file=None)
 
     sleep(2.0)
+
+    print(player.verticesPix)
+    print(">>> setting units")
+    player.units = "pix"
+    print(">>> setting pos")
+    player.pos = (-100, 200)
+    print(">>> setting size")
+    player.size = (300, 400)
+    print(player.verticesPix)
+    print(">>> setting flip")
+    player.flipHoriz = True
+    print(player.verticesPix)
+    player.flipVert = True
+    print(player.verticesPix)
 
     print(player.state)
     win.close()

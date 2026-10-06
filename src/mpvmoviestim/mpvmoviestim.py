@@ -71,6 +71,7 @@ from psychopy.layout import Size, Vector
 from psychopy.tools.monitorunittools import convertToPix
 from psychopy.visual.basevisual import BaseVisualStim, ContainerMixin, WindowMixin
 from pyglet import gl
+from typing_extensions import override
 
 from . import utils
 
@@ -80,6 +81,7 @@ if TYPE_CHECKING:
 
     import mpv
     from pyglet.window import BaseWindow
+
 
 TIMEOUT_DEFAULT_S = 5.0
 
@@ -93,7 +95,6 @@ TIMEOUT_DEFAULT_S = 5.0
 # "dither-depth": 8,  # mpv already selects this for rgba8 target
 # "dither": "fruit",  # already default
 # "audio_exclusive": "yes",
-
 
 __all__ = ["MpvMoviestim", "MpvMoviestimState"]
 
@@ -190,7 +191,6 @@ _mpv_default_options: dict[str, Any] = {
     "pause": True,  # start paused
     "idle": True,  # do not quit when there is no file to play (needed for rewind?)
     # "wid": 0,  # do not create a new window (implied by other settings)
-    # "keepaspect": False,
     "video-sync": "display-vdrop",
 }
 # TODO: test if display-vdrop is OK to set here; not setting fps and not calling report_swap
@@ -218,7 +218,7 @@ class MpvMoviestimState(Enum):
 
 @dataclasses.dataclass(slots=True)
 class NonThreadedState:
-    """Core objects related to single-threaded, direct draw mode."""
+    """Core objects related to single-threaded, immediate draw mode."""
 
     c_getproc: ctypes._CFunctionType
     mpv_render_ctx: mpv.MpvRenderContext
@@ -323,25 +323,25 @@ class MpvMoviestim(BaseVisualStim, ContainerMixin):
     # TODO: class docstring, w/ Attributes and init Parameters
     # PsychoPy
     _window: visual.Window
-    # TODO: remove _position and _size; the parent classes own pos/size (_pos and _size as
-    #       psychopy.layout.Vector objects), and _units belongs to WindowMixin.
-    _position: tuple[int | float, int | float]  # position in Psychopy units
-    _size: tuple[int | float, int | float] | None  # size in Psychopy units
+    # _position: tuple[int | float, int | float]  # position in Psychopy units
+    # _size: tuple[int | float, int | float] | None  # size in Psychopy units
     _monitor_framerate: float | None  # display-vdrop sync mode active if provided
-    flip_horizontal: bool
-    flip_vertical: bool
     _target_fbo_info: dict[str, int]  # mpv.MpvOpenGLFBO
     # Media
     _loaded_movie: Path | None
     _autostart: bool
     _media_size: tuple[int, int] | None
-    _draw_rect: tuple[int, int, int, int] | None  # display rect pix (x, y, w, h)
+    _mpv_options: dict[str, Any]
     # Core
     _state: MpvMoviestimState
     _threaded_mode: bool
     _render_context: ThreadedState | NonThreadedState | None
     _mpv_lib: ModuleType
     _player: mpv.MPV
+    _flip_horizontal: bool
+    _flip_vertical: bool
+    _draw_rect: tuple[int, int, int, int] | None  # display rect pix (x, y, w, h)
+    _set_size_from_media: bool
     # TODO: _advanced_control: bool
     # TODO: resize! egyelőre mindig ugyanolyan méretben renderelünk az MPV-vel
 
@@ -350,15 +350,20 @@ class MpvMoviestim(BaseVisualStim, ContainerMixin):
         window: visual.Window,
         file: Path | str | None,
         *,
-        autostart: bool = False,
-        no_audio: bool = False,
+        name: str = "",
+        units: str = "pix",
+        pos: Any = (0.0, 0.0),
+        size: Any = None,
+        anchor: str = "center",
+        depth: int = 0,
+        flipHoriz: bool = False,
+        flipVert: bool = False,
+        autoLog: bool = False,
+        autoStart: bool = False,
+        noAudio: bool = False,
         volume: float = 1.0,
-        pos: tuple[int | float, int | float] = (0, 0),
-        size: tuple[int | float, int | float] | None = None,
-        units: str | None = None,
-        flip_horiz: bool = False,
-        flip_vert: bool = False,
         monitor_framerate: float | None = None,
+        keep_aspect_ratio: bool = True,
         mpv_options: dict[str, Any] | None = None,
         double_buffering: bool = True,
         # TODO: advanced_control: bool = True,
@@ -368,22 +373,38 @@ class MpvMoviestim(BaseVisualStim, ContainerMixin):
         self._state = MpvMoviestimState.UNSPECIFIED
         logging.info("State set to UNSPECIFIED.")
 
-        # ******************************************
-        # Psychopy and display-related configuration
-        # ******************************************
-        # TODO: replace the _size/_position/_units/flip assignments below with
-        #       super().__init__(window, units, name, autoLog), then set (in this order, after
-        #       _media_size = None and _draw_rect = None): self.anchor, self.depth, self.flip
-        #       (from flip_horiz/flip_vert), self.pos, self.size. size=(0, 0) means "media size".
+        # store properties that we need ourselves
         self._window = window
-        self._size = size
-        self._position = pos
-        self._units = units if units is not None else window.units
-        self._autostart = autostart
-        self.flip_horizontal = flip_horiz
-        self.flip_vertical = flip_vert
         self._media_size = None
         self._draw_rect = None
+        self._autostart = autoStart
+        self._monitor_framerate = monitor_framerate
+        self._set_size_from_media = False  # set in self.size assignment
+
+        # ******************************
+        # Psychopy-related configuration
+        # ******************************
+
+        # invoke BaseVisualStim constructor
+        # autoLog must be False at this point
+        print("pp __init___ called")
+        super().__init__(window, units=units, name=name, autoLog=False)
+
+        # check for pyglet
+        if window.winType != "pyglet":
+            msg = "MpvMoviesStim can only be used with a pyglet window"
+            logging.error(msg)
+            raise RuntimeError(msg)
+
+        # configure properties handled by PsychoPy mixin classes
+        print("pp pos, size, anchor, depth, flip called")
+        self.vertices = None
+        self.anchor = anchor
+        self.depth = depth
+        self.flip = (flipHoriz, flipVert)
+        self.pos = pos
+        self.size = size
+        print("pp pos, size, anchor, depth, flip called - END")
 
         # infer FBO information (size, pixel format) for the PsychoPy window
         # Resizing controls for the PP window are disabled so target FBO size
@@ -404,8 +425,12 @@ class MpvMoviestim(BaseVisualStim, ContainerMixin):
         # add log handler
         player_options.update({"log_handler": self._mpv_log_fn, "loglevel": "info"})
 
+        # set aspect ratio handling (default: keep)
+        if not keep_aspect_ratio:
+            player_options["keepaspect"] = False
+
         # add audio options
-        if no_audio:
+        if noAudio:
             player_options["ao"] = "null"
         else:
             player_options.update(_mpv_default_audio_options)
@@ -425,12 +450,13 @@ class MpvMoviestim(BaseVisualStim, ContainerMixin):
         # apply user-specified MPV options
         if user_mpv_options is not None:
             player_options.update(user_mpv_options)
+        self._mpv_options = player_options
 
         # lazy import MPV
         self._mpv_lib = importlib.import_module("mpv")
 
         # initialise MPV core
-        self._player = self._mpv_lib.MPV(**player_options)
+        self._player = self._mpv_lib.MPV(**self._mpv_options)
 
         # set EOF callback
         self._player.observe_property("eof-reached", self._on_eof)
@@ -457,6 +483,15 @@ class MpvMoviestim(BaseVisualStim, ContainerMixin):
         # load movie if specified
         if file is not None:
             self.loadMovie(file)
+
+        # store initialisation parameters for use by __repr__
+        # self._initParams = dir()
+        # self._initParams.remove("self")
+
+        # set autoLog (now that params have been initialised)
+        self.autoLog = autoLog
+        if autoLog:
+            logging.exp(f"Created {self.name} = {self}")
 
     @_log_pre_post
     @_state_guard(allowed_state=MpvMoviestimState.UNSPECIFIED)
@@ -526,7 +561,7 @@ class MpvMoviestim(BaseVisualStim, ContainerMixin):
 
         # allocate an intermediate FBO for rendering
         # fbo, tex = self._allocate_intermediate_fbo()
-        # TODO: cannot do this until movie is loaded, otherwise no draw_rect!
+        # TODO: cannot do this until movie is loaded, otherwise no draw_rect! actually now we can but does it make sense?
 
         self._render_context = NonThreadedState(
             c_getproc=c_getproc,
@@ -556,115 +591,114 @@ class MpvMoviestim(BaseVisualStim, ContainerMixin):
         )
         # TODO: advanced_control=self._advanced_control,
 
-    # TODO: superseded by _refresh_draw_rect() (verticesPix based); delete after the __init__ refactor.
-    def _update_draw_rect(self) -> None:
-        """Calculate pixel-based bounding rectangle from Psychopy-based size and position.
+    # def _update_draw_rect(self) -> None:
+    #     """Calculate pixel-based bounding rectangle from Psychopy-based size and position.
 
-        Psychopy stores position and size in its own units, but we need pixel-based
-        ones for OpenGL rendering. This function calculates the bounding rectangle
-        [x, y, w, h] in pixels, where (x, y) define the bottom-left corner, and
-        (w, h) the display size, and stores it in `self._draw_rect`.
+    #     Psychopy stores position and size in its own units, but we need pixel-based
+    #     ones for OpenGL rendering. This function calculates the bounding rectangle
+    #     [x, y, w, h] in pixels, where (x, y) define the bottom-left corner, and
+    #     (w, h) the display size, and stores it in `self._draw_rect`.
 
-        The draw rect is used in the following places:
-        - Intermediate FBOs are allocated once after loading media, at media size or
-        draw rect size, whichever is larger, to allow resizing during playback up to
-        this allocated size. The draw rect's width and height define the area that's
-        actually used for image data in the intermediate FBOs for rendering and
-        drawing.
-        - Both MPV rendering and drawing to PsychoPy's surface use the same image size
-        (w, h). This means that MPV's superiour scaling algorithms are used to rescale
-        the media instead of doing it with OpenGL's simpler blit.
+    #     The draw rect is used in the following places:
+    #     - Intermediate FBOs are allocated once after loading media, at media size or
+    #     draw rect size, whichever is larger, to allow resizing during playback up to
+    #     this allocated size. The draw rect's width and height define the area that's
+    #     actually used for image data in the intermediate FBOs for rendering and
+    #     drawing.
+    #     - Both MPV rendering and drawing to PsychoPy's surface use the same image size
+    #     (w, h). This means that MPV's superiour scaling algorithms are used to rescale
+    #     the media instead of doing it with OpenGL's simpler blit.
 
-        Notes
-        -----
-        - Psychopy's window size is in pixels; position and size can be in other units.
-        - Non-pixel units are converted using Psychopy's `convertToPix` function.
-        - If display size is not given, media size is used if available.
-        - If neither size nor media size are available, the draw rect is not updated.
-        """
-        logging.info(
-            f"_bounding rect params: {self._size=}, {self._media_size=}, {self._position=}, {self._window=}, {self._units=}"
-        )
-        position = self._position
-        size = self._size
-        media_size = self._media_size
-        window = self._window
+    #     Notes
+    #     -----
+    #     - Psychopy's window size is in pixels; position and size can be in other units.
+    #     - Non-pixel units are converted using Psychopy's `convertToPix` function.
+    #     - If display size is not given, media size is used if available.
+    #     - If neither size nor media size are available, the draw rect is not updated.
+    #     """
+    #     logging.info(
+    #         f"_bounding rect params: {self._size=}, {self._media_size=}, {self._position=}, {self._window=}, {self._units=}"
+    #     )
+    #     position = self._position
+    #     size = self._size
+    #     media_size = self._media_size
+    #     window = self._window
 
-        if size is None and media_size is None:
-            logging.warning(
-                "Draw size not specified and media size not available,"
-                "cannot calculate draw rect."
-            )
-            return
+    #     if size is None and media_size is None:
+    #         logging.warning(
+    #             "Draw size not specified and media size not available,"
+    #             "cannot calculate draw rect."
+    #         )
+    #         return
 
-        screen_centre_px: tuple[int, int] = (
-            window.size[0] / 2,
-            window.size[1] / 2,
-        )
+    #     screen_centre_px: tuple[int, int] = (
+    #         window.size[0] / 2,
+    #         window.size[1] / 2,
+    #     )
 
-        # if units are not pix, convert to pixels what's necessary
-        if self._units != "pix":
-            if size is not None:
-                # If display size is provided, calculate bounding rect from it.
-                # Get vectors from screen centre to bottom-left/top-right of media in pixels.
-                # We directly calculate corner positions to allow for non-rectangular units.
-                corners = [
-                    (
-                        position[0] - size[0] / 2,
-                        position[1] - size[1] / 2,
-                    ),
-                    (
-                        position[0] + size[0] / 2,
-                        position[1] + size[1] / 2,
-                    ),
-                ]
-                bottom_left_px, top_right_px = cast(
-                    tuple[tuple[float, float], tuple[float, float]],
-                    convertToPix(
-                        pos=[0, 0],
-                        vertices=corners,
-                        units=self._units,
-                        win=window,
-                    ),
-                )
-            else:
-                assert media_size is not None  # guaranteed, silences dumb type checkers
-                # display size not provided, only convert position to px
-                # pos_px: screen centre -> media element centre vector in pixels
-                pos_px: tuple[float, float] = convertToPix(
-                    pos=[0, 0],
-                    vertices=[position],
-                    units=self._units,
-                    win=window,
-                )[0]
-                bottom_left_px = (
-                    pos_px[0] - media_size[0] / 2,
-                    pos_px[1] - media_size[1] / 2,
-                )
-                top_right_px = (
-                    pos_px[0] + media_size[0] / 2,
-                    pos_px[1] + media_size[1] / 2,
-                )
-            # bounding rect absolute coordinates = screen centre position +  corner vectors
-            bounding_rect = (
-                int(bottom_left_px[0] + screen_centre_px[0]),
-                int(bottom_left_px[1] + screen_centre_px[1]),
-                int(top_right_px[0] - bottom_left_px[0]),
-                int(top_right_px[1] - bottom_left_px[1]),
-            )
-        else:
-            # Everything is in pixels, we only need to decide what display size to use
-            size_px = size if size is not None else media_size
-            assert size_px is not None
-            bounding_rect = (
-                int(screen_centre_px[0] + position[0] - size_px[0] / 2),
-                int(screen_centre_px[1] + position[1] - size_px[1] / 2),
-                int(size_px[0]),
-                int(size_px[1]),
-            )
+    #     # if units are not pix, convert to pixels what's necessary
+    #     if self._units != "pix":
+    #         if size is not None:
+    #             # If display size is provided, calculate bounding rect from it.
+    #             # Get vectors from screen centre to bottom-left/top-right of media in pixels.
+    #             # We directly calculate corner positions to allow for non-rectangular units.
+    #             corners = [
+    #                 (
+    #                     position[0] - size[0] / 2,
+    #                     position[1] - size[1] / 2,
+    #                 ),
+    #                 (
+    #                     position[0] + size[0] / 2,
+    #                     position[1] + size[1] / 2,
+    #                 ),
+    #             ]
+    #             bottom_left_px, top_right_px = cast(
+    #                 tuple[tuple[float, float], tuple[float, float]],
+    #                 convertToPix(
+    #                     pos=[0, 0],
+    #                     vertices=corners,
+    #                     units=self._units,
+    #                     win=window,
+    #                 ),
+    #             )
+    #         else:
+    #             assert media_size is not None  # guaranteed, silences dumb type checkers
+    #             # display size not provided, only convert position to px
+    #             # pos_px: screen centre -> media element centre vector in pixels
+    #             pos_px: tuple[float, float] = convertToPix(
+    #                 pos=[0, 0],
+    #                 vertices=[position],
+    #                 units=self._units,
+    #                 win=window,
+    #             )[0]
+    #             bottom_left_px = (
+    #                 pos_px[0] - media_size[0] / 2,
+    #                 pos_px[1] - media_size[1] / 2,
+    #             )
+    #             top_right_px = (
+    #                 pos_px[0] + media_size[0] / 2,
+    #                 pos_px[1] + media_size[1] / 2,
+    #             )
+    #         # bounding rect absolute coordinates = screen centre position +  corner vectors
+    #         bounding_rect = (
+    #             int(bottom_left_px[0] + screen_centre_px[0]),
+    #             int(bottom_left_px[1] + screen_centre_px[1]),
+    #             int(top_right_px[0] - bottom_left_px[0]),
+    #             int(top_right_px[1] - bottom_left_px[1]),
+    #         )
+    #     else:
+    #         # Everything is in pixels, we only need to decide what display size to use
+    #         size_px = size if size is not None else media_size
+    #         assert size_px is not None
+    #         bounding_rect = (
+    #             int(screen_centre_px[0] + position[0] - size_px[0] / 2),
+    #             int(screen_centre_px[1] + position[1] - size_px[1] / 2),
+    #             int(size_px[0]),
+    #             int(size_px[1]),
+    #         )
 
-        logging.info(f"New draw rect: {self._draw_rect}.")
-        self._draw_rect = bounding_rect
+    #     logging.info(f"New draw rect: {self._draw_rect}.")
+    #     self._draw_rect = bounding_rect
 
     def _allocate_intermediate_fbo(self) -> tuple[dict[str, int], int]:
         """Allocate one intermediate FBO + backing texture on the current GL context.
@@ -818,8 +852,8 @@ class MpvMoviestim(BaseVisualStim, ContainerMixin):
         self._media_size = video_params["w"], video_params["h"]
 
         # update pixel-based draw rect
-        # TODO: replace with: if self._size_from_media: self.size = (0, 0)  (re-applies media size)
-        self._update_draw_rect()
+        if self._set_size_from_media:
+            self.size = (0, 0)
         # TODO: self._allocate_buffers()
 
         logging.exp(f"Loaded movie '{file}'.")
@@ -941,7 +975,6 @@ class MpvMoviestim(BaseVisualStim, ContainerMixin):
             logging.warning(
                 f"Cannot draw(), expected PLAYING state, got {self._state.name}."
             )
-            return
         if self._draw_rect is None:
             logging.error("draw() called but draw rectangle is undefined.")
             return
@@ -1020,8 +1053,8 @@ class MpvMoviestim(BaseVisualStim, ContainerMixin):
             self._draw_rect,
             st.intermediate_FBO_info["fbo"],
             self._target_fbo_info["fbo"],
-            self.flip_horizontal,
-            self.flip_vertical,
+            self._flip_horizontal,
+            self._flip_vertical,
         )
 
     @_state_guard(allowed_state=MpvMoviestimState.PLAYING)
@@ -1052,7 +1085,7 @@ class MpvMoviestim(BaseVisualStim, ContainerMixin):
         return self._state
 
     @property
-    def mpv_state(self) -> MpvMoviestimState:  # noqa: PLR0911
+    def mpv_state(self) -> MpvMoviestimState:
         # TODO: test
         if not hasattr(self, "_player") or self._player is None:
             return MpvMoviestimState.UNSPECIFIED
@@ -1067,44 +1100,6 @@ class MpvMoviestim(BaseVisualStim, ContainerMixin):
         if not self._player.core_idle:
             return MpvMoviestimState.PLAYING
         return MpvMoviestimState.UNSPECIFIED
-
-    # TODO: delete this commented-out size block once the overrides section is verified.
-    # @property
-    # def size(self) -> tuple[float | int, float | int] | None:
-    #     """User-requested display size of the stimulus in PsychoPy units.
-
-    #     Returns None if user did not set a desired display size. In that
-    #     case, the stimulus will be drawn at the media's native size.
-    #     """
-    #     return self._size
-
-    # @size.setter
-    # def size(self, new_size: tuple[float | int, float | int]) -> None:
-    #     """Set the user-requested display size of the stimulus in PsychoPy units.
-
-    #     Parameters
-    #     ----------
-    #     new_size : tuple[float | int, float | int]
-    #         New display size in the movie element's display units.
-
-    #     Notes
-    #     -----
-    #     - Initial buffers are allocated at the time of loading the media,
-    #     at the size of the media, or the window or the user-requested
-    #     display size (if any), whichever is largest.
-    #     - Resizing is allowed at any point after initialisation.
-    #     - Resizing to a size equal or smaller than the initially allocated
-    #     size is efficient. Resizing to a larger size incurs a performance
-    #     penalty, as the buffers need to be reallocated. Warning messages
-    #     are logged when this happens.
-    #     - Therefore, if it is expected that the display size could become
-    #     larger than the native media size or the window's size, it is
-    #     recommended to pass the largest expected size to the constructor,
-    #     or set the `size` property to that size before loading the media.
-    #     """
-    #     # TODO: check docstr, check upper size limit
-    #     self._size = new_size
-    #     self._update_draw_rect()
 
     def _mpv_update_callback(self) -> None:
         """Called by MPV when a new frame may be ready.
@@ -1452,8 +1447,8 @@ class MpvMoviestim(BaseVisualStim, ContainerMixin):
             self._draw_rect,
             fbo_info["fbo"],
             self._target_fbo_info["fbo"],
-            self.flip_horizontal,
-            self.flip_vertical,
+            self._flip_horizontal,
+            self._flip_vertical,
         )
 
         # Post a blit fence so the worker knows it's safe to write to this FBO
@@ -1466,27 +1461,15 @@ class MpvMoviestim(BaseVisualStim, ContainerMixin):
     # ------------------------------------------------------------------
     # BaseVisualStim and ContainerMixin overrides
     # ------------------------------------------------------------------
-    # Frames are blitted, so features needing a transformed or blended draw
-    # (rotation, opacity, custom shapes) are blocked, and geometry setters
-    # refresh the cached draw rect.
-    # pylint: disable=unused-argument,attribute-defined-outside-init
+    # Video frames are drawn using glBlitFramebuffer, which does not support
+    # rotation, opacity or custom shapes. Below overrides are used to prevent
+    # unsupported changes to the draw rect: setters are overriden to warn and
+    # ignore changes, and getters return default values.
 
-    _size_from_media: bool = False  # size=(0, 0) requested: follow the media size
-
-    def _warn_unsupported(self, feature: str) -> None:
+    def _warn_unsupported(self, method: str, feature: str) -> None:
         logging.warning(
-            f"MpvMoviestim: '{feature}' is not supported, the setting is ignored."
+            f"MpvMoviestim.{method}: '{feature}' is not supported, the setting is ignored."
         )
-
-    @staticmethod
-    def _is_zero_size(value: Any) -> bool:
-        if value is None or isinstance(value, Vector):
-            return False
-        try:
-            arr = np.asarray(value, dtype=float)
-        except (TypeError, ValueError):
-            return False
-        return arr.size > 0 and bool(np.all(arr == 0))
 
     def _refresh_draw_rect(self) -> None:
         """Recompute `_draw_rect` and the flip flags from PsychoPy's `verticesPix`."""
@@ -1496,142 +1479,266 @@ class MpvMoviestim(BaseVisualStim, ContainerMixin):
         ):
             return
 
-        verts = self.verticesPix  # 4x2, window-centre origin, order: BR, BL, TL, TR
-        xs, ys = verts[:, 0], verts[:, 1]
-        width = int(round(xs.max() - xs.min()))
-        height = int(round(ys.max() - ys.min()))
+        print(
+            f"refreshing draw rect, {self.win.size=}, {self.pos=}, {self.size=}, {self.verticesPix=}, {self.vertices=}, {self.anchor=}, {self.flip=}"
+        )
+
+        # pixels are integers anyway, round() is safe for conversion
+        verts = np.round(self.verticesPix).astype(
+            np.int32
+        )  # 4x2, window-centre origin, order: BR, BL, TL, TR
+        x0, y0 = verts.min(axis=0).tolist()  # bottom-left, centre origin, y up
+        x1, y1 = verts.max(axis=0).tolist()  # top-right
+        width, height = x1 - x0, y1 - y0
+
         if width <= 0 or height <= 0:
             logging.warning("Draw rect has zero area, nothing will be drawn.")
             self._draw_rect = None
             return
 
         # Single assignment: the render worker reads this from another thread.
-        self._draw_rect = (
-            int(round(xs.min() + self.win.size[0] / 2)),
-            int(round(ys.min() + self.win.size[1] / 2)),
+        self._draw_rect: tuple[int, int, int, int] = (
+            round(x0 + self.win.size[0] / 2),
+            round(y0 + self.win.size[1] / 2),
             width,
             height,
         )
         # Flip and negative size only reorder/negate vertices; read the mirroring from the order.
-        self.flip_horizontal = bool(verts[0, 0] < verts[1, 0])
-        self.flip_vertical = bool(verts[2, 1] < verts[1, 1])
+        self._flip_horizontal = bool(verts[0, 0] < verts[1, 0])
+        self._flip_vertical = bool(verts[2, 1] < verts[1, 1])
+        print(
+            f"new draw rect: {self._draw_rect}, flip_horizontal={self._flip_horizontal}, flip_vertical={self._flip_vertical}"
+        )
         logging.debug(f"New draw rect: {self._draw_rect}.")
 
-    # Overrides BaseVisualStim.opacity: blit cannot blend; getter is silent.
     @property
+    @override
     def opacity(self) -> float:
+        """Opacity is not supported, always returns 1.0."""
+        print("opacity getter called")
         return 1.0
 
     @opacity.setter
-    def opacity(self, value: Any) -> None:
-        self._warn_unsupported("opacity")
+    @override
+    def opacity(self, value: Any) -> None:  # pylint: disable=unused-argument
+        """Do not use, opacity is not supported."""
+        print("opacity setter called")
+        self._warn_unsupported("opacity", "opacity")
 
-    # Overrides BaseVisualStim.ori: blit cannot rotate; getter is silent.
     @property
-    def ori(self) -> float:
+    @override
+    def ori(self) -> float:  # pylint: disable=invalid-overridden-method,arguments-differ  # pyrefly: ignore[bad-override]
+        """Orientation is not supported, always returns 0.0."""
+        print("ori getter called")
         return 0.0
 
     @ori.setter
-    def ori(self, value: Any) -> None:
-        self._warn_unsupported("ori")
+    @override
+    def ori(self, value: Any) -> None:  # pylint: disable=invalid-overridden-method
+        """Do not use, orientation is not supported."""
+        print("ori setter called")
+        self._warn_unsupported("ori", "orientation")
 
-    # Overrides BaseVisualStim.alphaThreshold: no alpha handling in blit; getter is silent.
     @property
-    def alphaThreshold(self) -> float:
+    @override
+    def alphaThreshold(self) -> float:  # pylint: disable=invalid-overridden-method,arguments-differ  # pyrefly: ignore[bad-override]
+        """Alpha threshold is not supported, always returns 0.0."""
+        print("alphaThreshold getter called")
         return 0.0
 
     @alphaThreshold.setter
-    def alphaThreshold(self, value: Any) -> None:
-        self._warn_unsupported("alphaThreshold")
+    @override
+    def alphaThreshold(self, value: Any) -> None:  # pylint: disable=invalid-overridden-method
+        """Do not use, alpha threshold is not supported."""
+        print("alphaThreshold setter called")
+        self._warn_unsupported("alphaThreshold", "alpha threshold")
 
-    # Overrides BaseVisualStim.setOri: warn and never reach the parent.
+    @override
     def setOri(self, newOri: Any, operation: str = "", log: Any = None) -> None:
-        self._warn_unsupported("ori")
+        """Do not use, orientation is not supported."""
+        print("setOri called")
+        self._warn_unsupported("setOri", "orientation")
 
-    # Overrides BaseVisualStim.setOpacity: warn and never reach the parent.
+    @override
     def setOpacity(self, newOpacity: Any, operation: str = "", log: Any = None) -> None:
-        self._warn_unsupported("opacity")
+        """Do not use, opacity is not supported."""
+        print("setOpacity called")
+        self._warn_unsupported("setOpacity", "opacity")
 
-    # Overrides BaseVisualStim.setAlphaThreshold: warn and never reach the parent.
+    @override
     def setAlphaThreshold(self, value: Any, log: Any = None) -> None:
-        self._warn_unsupported("alphaThreshold")
+        """Do not use, alpha threshold is not supported."""
+        print("setAlphaThreshold called")
+        self._warn_unsupported("setAlphaThreshold", "alpha threshold")
 
-    # Overrides BaseVisualStim.updateOpacity: public hook, opacity is unsupported so no-op.
+    @override
     def updateOpacity(self) -> None:
-        return
+        """Defined as no-op in parent classes, overridden for clarity as opacity is not supported."""
+        print("updateOpacity called")
+        # self._warn_unsupported("updateOpacity", "opacity")
 
-    # Overrides WindowMixin.vertices: only the default square (None, as WindowMixin.flip
-    # passes internally) is accepted; user-supplied shapes are blocked. Getter is unchanged.
+    # Overrides WindowMixin.vertices: only None is passed through as it is used
+    # internally by WindowMixin.flip() to set a default shape. Any other shape
+    # is blocked.
     @property
+    @override
     def vertices(self) -> Any:
-        return WindowMixin.vertices.fget(self)  # type: ignore[misc]
+        """Returns the vertices of the visual stimulus in PsychoPy units."""
+        print("vertices getter called")
+        return super().vertices
+        # return WindowMixin.vertices
+        # return WindowMixin.vertices.fget(self)
 
     @vertices.setter
+    @override
     def vertices(self, value: Any) -> None:
-        if value is not None:
-            self._warn_unsupported("vertices (use pos and size instead)")
-            return
-        WindowMixin.vertices.fset(self, value)  # type: ignore[misc]
+        """Do not use, vertices are not supported.
 
-    # Overrides BaseVisualStim.pos: refresh the draw rect after the parent applies the change.
+        MpvMovieStim only allows axis-aligned draw rectangles, therefore,
+        setting arbitrary vertices is not supported. Draw dimensions can be
+        set using the `pos`, `size`, `flip*` and `anchor` properties.
+
+        The `vertices` property is only used internally with a None value
+        to reset the shape to a default rectangle. Any other value is ignored.
+        """
+
+        print("vertices setter called")
+        if value is not None:
+            self._warn_unsupported("vertices", "vertices")
+            return
+        vars(WindowMixin)["vertices"].__set__(self, value)  # pylint: disable=unnecessary-dunder-call
+        # WindowMixin.vertices.fset(self, value)
+
     @property
+    @override
     def pos(self) -> Any:
-        return BaseVisualStim.pos.fget(self)  # type: ignore[misc]
+        """Returns the position of the visual stimulus in PsychoPy units.
+
+        See PsychoPy's documentation for details.
+        """
+        print(f"pos getter called, returns {super().pos}")
+        return super().pos
+        # return BaseVisualStim.pos.fget(self)
 
     @pos.setter
+    @override
     def pos(self, value: Any) -> None:
-        BaseVisualStim.pos.fset(self, value)  # type: ignore[misc]
-        self._refresh_draw_rect()
+        """Sets the position of the visual stimulus in PsychoPy units.
 
-    # Overrides BaseVisualStim.size: all-zero size means "media size" (PsychoPy would
-    # treat None as 1x1 height, which is left as is); refreshes the draw rect.
+        See PsychoPy's documentation for details.
+        """
+        vars(BaseVisualStim)["pos"].__set__(self, value)  # pylint: disable=unnecessary-dunder-call
+        # BaseVisualStim.pos.fset(self, value)
+        self._refresh_draw_rect()
+        print(f"pos setter called, {value=}")
+
     @property
+    @override
     def size(self) -> Any:
-        return BaseVisualStim.size.fget(self)  # type: ignore[misc]
+        """Returns the display size of the stimulus in PsychoPy units.
+
+        See PsychoPy's documentation for details.
+        """
+        print(f"size getter called, returns {super().size}")
+        return super().size
+        # return BaseVisualStim.size.fget(self)
 
     @size.setter
+    @override
     def size(self, value: Any) -> None:
-        if self._is_zero_size(value):
-            self._size_from_media = True
+        """Sets the display size of the stimulus in PsychoPy units.
+
+        If the value is zero (a single zero or a tuple of zeros (0, 0)), the
+        stimulus will be drawn at the media's native size. Otherwise, see
+        PsychoPy's documentation for details.
+        """
+        if (isinstance(value, (int, float)) and value == 0) or (
+            isinstance(value, (tuple, list))
+            and len(value) == 2
+            and value[0] == 0
+            and value[1] == 0
+        ):
+            self._set_size_from_media = True
             # Without media yet, None is a placeholder; loadMovie re-applies the request.
-            value = (
-                Size(self._media_size, units="pix", win=self.win)
-                if self._media_size is not None
-                else None
-            )
+            if self._media_size is not None:
+                vars(BaseVisualStim)["size"].__set__(  # pylint: disable=unnecessary-dunder-call
+                    self, Size(self._media_size, units="pix", win=self.win)
+                )
         else:
-            self._size_from_media = False
-        BaseVisualStim.size.fset(self, value)  # type: ignore[misc]
+            self._set_size_from_media = False
+            vars(BaseVisualStim)["size"].__set__(self, value)  # pylint: disable=unnecessary-dunder-call
+            # BaseVisualStim.size.fset(self, value)
         self._refresh_draw_rect()
+        print(f"size setter called, {value=}")
 
     # Overrides WindowMixin.anchor: the parent setter never marks vertices dirty.
     @property
+    @override
     def anchor(self) -> Any:
-        return WindowMixin.anchor.fget(self)  # type: ignore[misc]
+        """Returns the anchor point of the visual stimulus.
+
+        See PsychoPy's documentation for details.
+        """
+        print(f"anchor getter called, returns {super().anchor}")
+        return super().anchor
+        # return WindowMixin.anchor.fget(self)
 
     @anchor.setter
+    @override
     def anchor(self, value: Any) -> None:
-        WindowMixin.anchor.fset(self, value)  # type: ignore[misc]
+        """Sets the anchor point of the visual stimulus.
+
+        Triggers a shape update that is missing in the parent classes.
+        See PsychoPy's documentation for details.
+        """
+        # WindowMixin.anchor.fset(self, value)
+        vars(WindowMixin)["anchor"].__set__(self, value)  # pylint: disable=unnecessary-dunder-call
         self._needVertexUpdate = True
         self._refresh_draw_rect()
+        print(f"anchor setter called, {value=}")
 
-    # Overrides WindowMixin.flip (also covers flipHoriz/flipVert): the parent keeps the
-    # state; the refresh derives flip_horizontal/flip_vertical for the blit.
     @property
+    @override
     def flip(self) -> Any:
-        return WindowMixin.flip.fget(self)  # type: ignore[misc]
+        """Returns the flip state of the visual stimulus.
+
+        See PsychoPy's documentation for details.
+        """
+        print(f"flip getter called, returns {super().flip}")
+        # return WindowMixin.flip.fget(self)
+        return super().flip
 
     @flip.setter
+    @override
     def flip(self, value: Any) -> None:
-        WindowMixin.flip.fset(self, value)  # type: ignore[misc]
-        self._refresh_draw_rect()
+        """Sets the flip state of the visual stimulus.
 
-    # Overrides WindowMixin.units: stored pixels stay, but degFlat units can shift vertices.
+        See PsychoPy's documentation for details.
+        """
+        # WindowMixin.flip.fset(self, value)
+        vars(WindowMixin)["flip"].__set__(self, value)  # pylint: disable=unnecessary-dunder-call
+        self._refresh_draw_rect()
+        print(f"flip setter called, {value=}")
+
     @property
+    @override
     def units(self) -> Any:
-        return WindowMixin.units.fget(self)  # type: ignore[misc]
+        """Returns the units of the visual stimulus.
+
+        See PsychoPy's documentation for details.
+        """
+        # return WindowMixin.units.fget(self)
+        print(f"units getter called, returns {super().units}")
+        return super().units
 
     @units.setter
+    @override
     def units(self, value: Any) -> None:
-        WindowMixin.units.fset(self, value)  # type: ignore[misc]
+        """Sets the units of the visual stimulus.
+
+        See PsychoPy's documentation for details.
+        """
+        # WindowMixin.units.fset(self, value)
+        vars(WindowMixin)["units"].__set__(self, value)  # pylint: disable=unnecessary-dunder-call
         self._refresh_draw_rect()
+        print(f"units setter called, {value=}")
