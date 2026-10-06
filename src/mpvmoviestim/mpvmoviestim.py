@@ -64,10 +64,12 @@ from pathlib import Path
 from types import ModuleType
 from typing import TYPE_CHECKING, ParamSpec, TypeVar, cast
 
+import numpy as np
 import pyglet
 from psychopy import logging, visual
+from psychopy.layout import Size, Vector
 from psychopy.tools.monitorunittools import convertToPix
-from psychopy.visual.basevisual import BaseVisualStim, ContainerMixin
+from psychopy.visual.basevisual import BaseVisualStim, ContainerMixin, WindowMixin
 from pyglet import gl
 
 from . import utils
@@ -321,6 +323,8 @@ class MpvMoviestim(BaseVisualStim, ContainerMixin):
     # TODO: class docstring, w/ Attributes and init Parameters
     # PsychoPy
     _window: visual.Window
+    # TODO: remove _position and _size; the parent classes own pos/size (_pos and _size as
+    #       psychopy.layout.Vector objects), and _units belongs to WindowMixin.
     _position: tuple[int | float, int | float]  # position in Psychopy units
     _size: tuple[int | float, int | float] | None  # size in Psychopy units
     _monitor_framerate: float | None  # display-vdrop sync mode active if provided
@@ -367,6 +371,10 @@ class MpvMoviestim(BaseVisualStim, ContainerMixin):
         # ******************************************
         # Psychopy and display-related configuration
         # ******************************************
+        # TODO: replace the _size/_position/_units/flip assignments below with
+        #       super().__init__(window, units, name, autoLog), then set (in this order, after
+        #       _media_size = None and _draw_rect = None): self.anchor, self.depth, self.flip
+        #       (from flip_horiz/flip_vert), self.pos, self.size. size=(0, 0) means "media size".
         self._window = window
         self._size = size
         self._position = pos
@@ -548,6 +556,7 @@ class MpvMoviestim(BaseVisualStim, ContainerMixin):
         )
         # TODO: advanced_control=self._advanced_control,
 
+    # TODO: superseded by _refresh_draw_rect() (verticesPix based); delete after the __init__ refactor.
     def _update_draw_rect(self) -> None:
         """Calculate pixel-based bounding rectangle from Psychopy-based size and position.
 
@@ -809,6 +818,7 @@ class MpvMoviestim(BaseVisualStim, ContainerMixin):
         self._media_size = video_params["w"], video_params["h"]
 
         # update pixel-based draw rect
+        # TODO: replace with: if self._size_from_media: self.size = (0, 0)  (re-applies media size)
         self._update_draw_rect()
         # TODO: self._allocate_buffers()
 
@@ -926,6 +936,7 @@ class MpvMoviestim(BaseVisualStim, ContainerMixin):
 
     def draw(self) -> None:
         # Don't use the guard wrapper here for performance reasons.
+        # TODO: with autoDraw, PsychoPy calls draw() every frame; this warning would flood the log.
         if self._state != MpvMoviestimState.PLAYING:
             logging.warning(
                 f"Cannot draw(), expected PLAYING state, got {self._state.name}."
@@ -1057,6 +1068,7 @@ class MpvMoviestim(BaseVisualStim, ContainerMixin):
             return MpvMoviestimState.PLAYING
         return MpvMoviestimState.UNSPECIFIED
 
+    # TODO: delete this commented-out size block once the overrides section is verified.
     # @property
     # def size(self) -> tuple[float | int, float | int] | None:
     #     """User-requested display size of the stimulus in PsychoPy units.
@@ -1450,3 +1462,176 @@ class MpvMoviestim(BaseVisualStim, ContainerMixin):
             gl.GL_SYNC_GPU_COMMANDS_COMPLETE, 0
         )
         gl.glFlush()
+
+    # ------------------------------------------------------------------
+    # BaseVisualStim and ContainerMixin overrides
+    # ------------------------------------------------------------------
+    # Frames are blitted, so features needing a transformed or blended draw
+    # (rotation, opacity, custom shapes) are blocked, and geometry setters
+    # refresh the cached draw rect.
+    # pylint: disable=unused-argument,attribute-defined-outside-init
+
+    _size_from_media: bool = False  # size=(0, 0) requested: follow the media size
+
+    def _warn_unsupported(self, feature: str) -> None:
+        logging.warning(
+            f"MpvMoviestim: '{feature}' is not supported, the setting is ignored."
+        )
+
+    @staticmethod
+    def _is_zero_size(value: Any) -> bool:
+        if value is None or isinstance(value, Vector):
+            return False
+        try:
+            arr = np.asarray(value, dtype=float)
+        except (TypeError, ValueError):
+            return False
+        return arr.size > 0 and bool(np.all(arr == 0))
+
+    def _refresh_draw_rect(self) -> None:
+        """Recompute `_draw_rect` and the flip flags from PsychoPy's `verticesPix`."""
+        # Setters can fire inside BaseVisualStim.__init__ before pos/size exist.
+        if not isinstance(getattr(self, "_pos", None), Vector) or not isinstance(
+            getattr(self, "_size", None), Vector
+        ):
+            return
+
+        verts = self.verticesPix  # 4x2, window-centre origin, order: BR, BL, TL, TR
+        xs, ys = verts[:, 0], verts[:, 1]
+        width = int(round(xs.max() - xs.min()))
+        height = int(round(ys.max() - ys.min()))
+        if width <= 0 or height <= 0:
+            logging.warning("Draw rect has zero area, nothing will be drawn.")
+            self._draw_rect = None
+            return
+
+        # Single assignment: the render worker reads this from another thread.
+        self._draw_rect = (
+            int(round(xs.min() + self.win.size[0] / 2)),
+            int(round(ys.min() + self.win.size[1] / 2)),
+            width,
+            height,
+        )
+        # Flip and negative size only reorder/negate vertices; read the mirroring from the order.
+        self.flip_horizontal = bool(verts[0, 0] < verts[1, 0])
+        self.flip_vertical = bool(verts[2, 1] < verts[1, 1])
+        logging.debug(f"New draw rect: {self._draw_rect}.")
+
+    # Overrides BaseVisualStim.opacity: blit cannot blend; getter is silent.
+    @property
+    def opacity(self) -> float:
+        return 1.0
+
+    @opacity.setter
+    def opacity(self, value: Any) -> None:
+        self._warn_unsupported("opacity")
+
+    # Overrides BaseVisualStim.ori: blit cannot rotate; getter is silent.
+    @property
+    def ori(self) -> float:
+        return 0.0
+
+    @ori.setter
+    def ori(self, value: Any) -> None:
+        self._warn_unsupported("ori")
+
+    # Overrides BaseVisualStim.alphaThreshold: no alpha handling in blit; getter is silent.
+    @property
+    def alphaThreshold(self) -> float:
+        return 0.0
+
+    @alphaThreshold.setter
+    def alphaThreshold(self, value: Any) -> None:
+        self._warn_unsupported("alphaThreshold")
+
+    # Overrides BaseVisualStim.setOri: warn and never reach the parent.
+    def setOri(self, newOri: Any, operation: str = "", log: Any = None) -> None:
+        self._warn_unsupported("ori")
+
+    # Overrides BaseVisualStim.setOpacity: warn and never reach the parent.
+    def setOpacity(self, newOpacity: Any, operation: str = "", log: Any = None) -> None:
+        self._warn_unsupported("opacity")
+
+    # Overrides BaseVisualStim.setAlphaThreshold: warn and never reach the parent.
+    def setAlphaThreshold(self, value: Any, log: Any = None) -> None:
+        self._warn_unsupported("alphaThreshold")
+
+    # Overrides BaseVisualStim.updateOpacity: public hook, opacity is unsupported so no-op.
+    def updateOpacity(self) -> None:
+        return
+
+    # Overrides WindowMixin.vertices: only the default square (None, as WindowMixin.flip
+    # passes internally) is accepted; user-supplied shapes are blocked. Getter is unchanged.
+    @property
+    def vertices(self) -> Any:
+        return WindowMixin.vertices.fget(self)  # type: ignore[misc]
+
+    @vertices.setter
+    def vertices(self, value: Any) -> None:
+        if value is not None:
+            self._warn_unsupported("vertices (use pos and size instead)")
+            return
+        WindowMixin.vertices.fset(self, value)  # type: ignore[misc]
+
+    # Overrides BaseVisualStim.pos: refresh the draw rect after the parent applies the change.
+    @property
+    def pos(self) -> Any:
+        return BaseVisualStim.pos.fget(self)  # type: ignore[misc]
+
+    @pos.setter
+    def pos(self, value: Any) -> None:
+        BaseVisualStim.pos.fset(self, value)  # type: ignore[misc]
+        self._refresh_draw_rect()
+
+    # Overrides BaseVisualStim.size: all-zero size means "media size" (PsychoPy would
+    # treat None as 1x1 height, which is left as is); refreshes the draw rect.
+    @property
+    def size(self) -> Any:
+        return BaseVisualStim.size.fget(self)  # type: ignore[misc]
+
+    @size.setter
+    def size(self, value: Any) -> None:
+        if self._is_zero_size(value):
+            self._size_from_media = True
+            # Without media yet, None is a placeholder; loadMovie re-applies the request.
+            value = (
+                Size(self._media_size, units="pix", win=self.win)
+                if self._media_size is not None
+                else None
+            )
+        else:
+            self._size_from_media = False
+        BaseVisualStim.size.fset(self, value)  # type: ignore[misc]
+        self._refresh_draw_rect()
+
+    # Overrides WindowMixin.anchor: the parent setter never marks vertices dirty.
+    @property
+    def anchor(self) -> Any:
+        return WindowMixin.anchor.fget(self)  # type: ignore[misc]
+
+    @anchor.setter
+    def anchor(self, value: Any) -> None:
+        WindowMixin.anchor.fset(self, value)  # type: ignore[misc]
+        self._needVertexUpdate = True
+        self._refresh_draw_rect()
+
+    # Overrides WindowMixin.flip (also covers flipHoriz/flipVert): the parent keeps the
+    # state; the refresh derives flip_horizontal/flip_vertical for the blit.
+    @property
+    def flip(self) -> Any:
+        return WindowMixin.flip.fget(self)  # type: ignore[misc]
+
+    @flip.setter
+    def flip(self, value: Any) -> None:
+        WindowMixin.flip.fset(self, value)  # type: ignore[misc]
+        self._refresh_draw_rect()
+
+    # Overrides WindowMixin.units: stored pixels stay, but degFlat units can shift vertices.
+    @property
+    def units(self) -> Any:
+        return WindowMixin.units.fget(self)  # type: ignore[misc]
+
+    @units.setter
+    def units(self, value: Any) -> None:
+        WindowMixin.units.fset(self, value)  # type: ignore[misc]
+        self._refresh_draw_rect()
