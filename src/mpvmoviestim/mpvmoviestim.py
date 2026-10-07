@@ -220,11 +220,18 @@ class MpvMoviestimState(Enum):
 class NonThreadedState:
     """Core objects related to single-threaded, immediate draw mode."""
 
+    # context objects for rendering
     c_getproc: ctypes._CFunctionType
     mpv_render_ctx: mpv.MpvRenderContext
+
+    # draw buffer
     intermediate_FBO_info: dict[str, int] | None = None  # mpv.MpvOpenGLFBO
     intermediate_tex_id: int | None = None
-    FBO_allocated_size: tuple[int, int] | None = None
+    # Size of FBO on allocation, need to reallocate if size exceeds this.
+    intermediate_FBO_allocated_size: tuple[int, int] | None = None
+    # Size of the image stored in the FBO
+    # may differ from draw_rect if stim is resized during playback
+    FBO_frame_render_size: tuple[int, int] | None = None
 
 
 @dataclasses.dataclass(slots=True)
@@ -293,9 +300,12 @@ class ThreadedState:
     mpv_render_ctx: mpv.MpvRenderContext | None = None
 
     # Double buffering
-    intermediate_fbo_infos: tuple[dict[str, int], dict[str, int]] | None = None
-    intermediate_fbo_textures: tuple[int, int] | None = None
-    FBO_allocated_size: tuple[int, int] | None = None
+    intermediate_FBO_infos: tuple[dict[str, int], dict[str, int]] | None = None
+    intermediate_FBO_textures: tuple[int, int] | None = None
+    intermediate_FBO_allocated_sizes: tuple[tuple[int, int], tuple[int, int]] | None = (
+        None
+    )
+    FBO_frame_render_sizes: tuple[tuple[int, int], tuple[int, int]] | None = None
     present_fbo_idx: int = -1
     worker_fbo_idx: int = 0
 
@@ -1015,7 +1025,7 @@ class MpvMoviestim(BaseVisualStim, ContainerMixin):
                 fbo_info, tex_id = self._allocate_intermediate_fbo()
                 st.intermediate_FBO_info = fbo_info
                 st.intermediate_tex_id = tex_id
-                st.FBO_allocated_size = (fbo_info["w"], fbo_info["h"])
+                st.intermediate_FBO_allocated_size = (fbo_info["w"], fbo_info["h"])
             else:
                 logging.warning(
                     "No buffers to render into and no draw rectangle defined, cannot render."
@@ -1295,7 +1305,7 @@ class MpvMoviestim(BaseVisualStim, ContainerMixin):
             # drain pending MPV updates, remember whether there's a new vframe ready
             new_vframe_available: bool = mpv_render_ctx.update()
             print(
-                f"worker - {new_vframe_available=}, {ts.intermediate_fbo_infos=}, {self._draw_rect=}"
+                f"worker - {new_vframe_available=}, {ts.intermediate_FBO_infos=}, {self._draw_rect=}"
             )
 
             # if new_vframe_available:
@@ -1307,20 +1317,20 @@ class MpvMoviestim(BaseVisualStim, ContainerMixin):
             #     finfo: mpv.MpvRenderFrameInfo = finfo_param.value
             #     print(f"worker - {finfo.target_time=}, {finfo.flags=}")
 
-            if ts.intermediate_fbo_infos is None and self._draw_rect is not None:
+            if ts.intermediate_FBO_infos is None and self._draw_rect is not None:
                 print("allocating buffers")
                 # allocate intermediate FBOs for double buffering
                 fbo1, tex1 = self._allocate_intermediate_fbo()
                 fbo2, tex2 = self._allocate_intermediate_fbo()
-                ts.intermediate_fbo_infos = (
+                ts.intermediate_FBO_infos = (
                     fbo1,
                     fbo2,
                 )
-                ts.intermediate_fbo_textures = (
+                ts.intermediate_FBO_textures = (
                     tex1,
                     tex2,
                 )
-                ts.FBO_allocated_size = (fbo1["w"], fbo1["h"])
+                ts.intermediate_FBO_allocated_sizes = (fbo1["w"], fbo1["h"])
 
                 # set initial buffer indices
                 ts.worker_fbo_idx = 0
@@ -1334,7 +1344,7 @@ class MpvMoviestim(BaseVisualStim, ContainerMixin):
 
             # Ignore callbacks when there is no new frame to render
             # (can happen when advanced control is enabled)
-            if not new_vframe_available or ts.intermediate_fbo_infos is None:
+            if not new_vframe_available or ts.intermediate_FBO_infos is None:
                 continue
 
             # Set busy flag to tell main not to flip buffers while we're rendering.
@@ -1347,7 +1357,7 @@ class MpvMoviestim(BaseVisualStim, ContainerMixin):
                 ts.worker_is_rendering = True
                 target_idx = ts.worker_fbo_idx
 
-            fbo_info = ts.intermediate_fbo_infos[target_idx]
+            fbo_info = ts.intermediate_FBO_infos[target_idx]
             if self._draw_rect is None:
                 raise RuntimeError("Draw rectangle is not defined.")
             scaled_fbo_info = fbo_info | {
@@ -1388,11 +1398,11 @@ class MpvMoviestim(BaseVisualStim, ContainerMixin):
 
         # --- cleanup (shadow context still current on this thread) ---
         mpv_render_ctx.free()
-        if ts.intermediate_fbo_textures is not None:
-            for tex in ts.intermediate_fbo_textures:
+        if ts.intermediate_FBO_textures is not None:
+            for tex in ts.intermediate_FBO_textures:
                 utils.gl_texture_destroy(tex)
-        if ts.intermediate_fbo_infos is not None:
-            for fbo in ts.intermediate_fbo_infos:
+        if ts.intermediate_FBO_infos is not None:
+            for fbo in ts.intermediate_FBO_infos:
                 utils.gl_fbo_destroy(fbo["fbo"])
         utils.release_gl_context()
 
@@ -1419,7 +1429,7 @@ class MpvMoviestim(BaseVisualStim, ContainerMixin):
 
         ts = self._render_context
 
-        if ts.intermediate_fbo_infos is None:
+        if ts.intermediate_FBO_infos is None:
             logging.error("draw() called but intermediate FBOs are not initialized.")
             return
 
@@ -1455,7 +1465,7 @@ class MpvMoviestim(BaseVisualStim, ContainerMixin):
             logging.error("draw() called but no frame has been rendered yet.")
             return
 
-        fbo_info = ts.intermediate_fbo_infos[present_idx]
+        fbo_info = ts.intermediate_FBO_infos[present_idx]
 
         # the GPU pipeline may still be executing the worker's render into this FBO,
         # so we tell the GPU to wait for the worker's sync fence
