@@ -42,19 +42,21 @@ def main() -> None:
 
     sleep(2.0)
 
-    print(player.verticesPix)
-    print(">>> setting units")
-    player.units = "pix"
-    print(">>> setting pos")
-    player.pos = (-100, 200)
-    print(">>> setting size")
-    player.size = (300, 400)
-    print(player.verticesPix)
-    print(">>> setting flip")
-    player.flipHoriz = True
-    print(player.verticesPix)
-    player.flipVert = True
-    print(player.verticesPix)
+    # print(player.verticesPix)
+    # print(">>> setting units")
+    # player.units = "pix"
+    # print(">>> setting pos")
+    # player.pos = (-100, 200)
+    # print(">>> setting size")
+    # player.size = (300, 400)
+    # print(player.verticesPix)
+    # print(">>> setting flip")
+    # player.flipHoriz = True
+    # print(player.verticesPix)
+    # player.flipVert = True
+    # print(player.verticesPix)
+
+    print(player._player.pause)
 
     print(player.state)
     win.close()

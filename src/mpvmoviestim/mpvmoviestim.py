@@ -68,7 +68,6 @@ import numpy as np
 import pyglet
 from psychopy import logging, visual
 from psychopy.layout import Size, Vector
-from psychopy.tools.monitorunittools import convertToPix
 from psychopy.visual.basevisual import BaseVisualStim, ContainerMixin, WindowMixin
 from pyglet import gl
 from typing_extensions import override
@@ -187,9 +186,10 @@ _mpv_default_options: dict[str, Any] = {
     "vo": "libmpv",  # render using the render_context API
     "hwdec": "auto-safe",  # automatically choose H/W decoding pipeline
     "gpu_api": "opengl",  # use OpenGL API
-    "keep-open": "always",  # pause when reaching the end of the current file
+    "keep-open": "always",  # don't stop when playback ends (EOF reached, no loop and no more files)
+    # "keep-open-pause": "yes",  # default yes, pause when playback ends and kee-open is set
     "pause": True,  # start paused
-    "idle": True,  # do not quit when there is no file to play (needed for rewind?)
+    "idle": True,  # do not quit when there is no file to play
     # "wid": 0,  # do not create a new window (implied by other settings)
     "video-sync": "display-vdrop",
 }
@@ -344,6 +344,7 @@ class MpvMoviestim(BaseVisualStim, ContainerMixin):
     _set_size_from_media: bool
     # TODO: _advanced_control: bool
     # TODO: resize! egyelőre mindig ugyanolyan méretben renderelünk az MPV-vel
+    # TODO: MPV supports playlists, loop file, loop playlist
 
     def __init__(
         self,
@@ -1022,6 +1023,25 @@ class MpvMoviestim(BaseVisualStim, ContainerMixin):
                 return
 
         # mpv._mpv_render_context_get_info(ctx._handle, frameinfo)
+        # video-frame-info
+        # Approximate information of the current frame. Note that if any of these are used on OSD, the information might be off by a few frames due to OSD redrawing and frame display being somewhat disconnected, and you might have to pause and force a redraw.
+
+        # This has a number of sub-properties:
+
+        # video-frame-info/picture-type
+        # The type of the picture. It can be "I" (intra), "P" (predicted), "B" (bi-dir predicted) or unavailable.
+        # video-frame-info/interlaced
+        # Whether the content of the frame is interlaced.
+        # video-frame-info/tff
+        # If the content is interlaced, whether the top field is displayed first.
+        # video-frame-info/repeat
+        # Whether the frame must be delayed when decoding.
+        # video-frame-info/gop-timecode
+        # String with the GOP timecode encoded in the frame.
+        # video-frame-info/smpte-timecode
+        # String with the SMPTE timecode encoded in the frame.
+        # video-frame-info/estimated-smpte-timecode
+        # Estimated timecode based on the current playback position and frame count.
 
         if mpv_render_ctx.update():
             # save viewport info because MPV can change that
@@ -1077,7 +1097,10 @@ class MpvMoviestim(BaseVisualStim, ContainerMixin):
         mode, or to not call it ever if audio-sync is to be used.
         Ensuring this is entirely left to the user.
         """
-        if self._render_context.mpv_render_ctx is not None:
+        if (
+            self._render_context is not None
+            and self._render_context.mpv_render_ctx is not None
+        ):
             self._render_context.mpv_render_ctx.report_swap()
 
     @property
@@ -1085,19 +1108,19 @@ class MpvMoviestim(BaseVisualStim, ContainerMixin):
         return self._state
 
     @property
-    def mpv_state(self) -> MpvMoviestimState:
-        # TODO: test
+    def mpv_state(self) -> MpvMoviestimState:  # noqa: PLR0911
         if not hasattr(self, "_player") or self._player is None:
             return MpvMoviestimState.UNSPECIFIED
-        if self._player.core_shutdown:
+        if self._player.core_shutdown:  # True after SHUTDOWN event (quit etc.)
             return MpvMoviestimState.SHUTDOWN
-        if self._player.pause:
+        if self._player.pause:  # True if paused
             return MpvMoviestimState.PAUSED
-        if self._player.idle_active:
+        if self._player.idle_active:  # True when no media is loaded in IDLE mode
             return MpvMoviestimState.NO_MEDIA
+        # True on EOF (needs keep-open otherwise player plays or quits)
         if self._player.eof_reached:
             return MpvMoviestimState.EOF_REACHED
-        if not self._player.core_idle:
+        if not self._player.core_idle:  # False when no video is playing
             return MpvMoviestimState.PLAYING
         return MpvMoviestimState.UNSPECIFIED
 
