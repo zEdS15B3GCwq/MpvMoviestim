@@ -76,7 +76,7 @@ from . import utils
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from typing import Any
+    from typing import Any, Literal
 
     import mpv
     from pyglet.window import BaseWindow
@@ -376,7 +376,7 @@ class MpvMoviestim(BaseVisualStim, ContainerMixin):
         monitor_framerate: float | None = None,
         keep_aspect_ratio: bool = True,
         mpv_options: dict[str, Any] | None = None,
-        double_buffering: bool = True,
+        draw_mode: Literal["double-buffered", "immediate"] = "double-buffered",
     ):
         # unspecified - not initialized or unknown state
         self._state = MpvMoviestimState.UNSPECIFIED
@@ -474,13 +474,17 @@ class MpvMoviestim(BaseVisualStim, ContainerMixin):
         # *****************************************************
 
         # initialise threaded, double-buffered or single-threaded, immediate draw mode
-        self._threaded_mode = double_buffering
-        if self._threaded_mode:
-            # threaded, double-buffered drawing mode
-            self._init_threaded_mode()
-        else:
-            # single-threaded, direct draw mode
-            self._init_nonthreaded_mode()
+        match draw_mode:
+            case "double-buffered":
+                self._treaded_mode = True
+                self._init_threaded_mode()
+            case "immediate":
+                self._threaded_mode = False
+                self._init_nonthreaded_mode()
+            case _:
+                raise ValueError(
+                    f"Invalid draw_mode: {draw_mode}. Must be 'double-buffered' or 'immediate'."
+                )
 
         # *******************
         # Initialisation done
