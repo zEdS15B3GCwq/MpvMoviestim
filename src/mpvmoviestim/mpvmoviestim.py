@@ -217,7 +217,7 @@ class MpvMoviestimState(Enum):
 
 
 @dataclasses.dataclass(slots=True)
-class NonThreadedState:
+class SingleThreadedContext:
     """Core objects related to single-threaded, immediate draw mode."""
 
     # context objects for rendering
@@ -235,7 +235,7 @@ class NonThreadedState:
 
 
 @dataclasses.dataclass(slots=True)
-class ThreadedState:
+class TwoThreadedContext:
     """Synchronisation primitives and core objects related to the rendering worker thread.
 
     - The worker thread is responsible for rendering MPV vframes into intermediate FBOs.
@@ -330,11 +330,8 @@ class ThreadedState:
 
 
 class MpvMoviestim(BaseVisualStim, ContainerMixin):
-    # TODO: class docstring, w/ Attributes and init Parameters
     # PsychoPy
     _window: visual.Window
-    # _position: tuple[int | float, int | float]  # position in Psychopy units
-    # _size: tuple[int | float, int | float] | None  # size in Psychopy units
     _monitor_framerate: float | None  # display-vdrop sync mode active if provided
     _target_fbo_info: dict[str, int]  # mpv.MpvOpenGLFBO
     # Media
@@ -345,18 +342,21 @@ class MpvMoviestim(BaseVisualStim, ContainerMixin):
     # Core
     _state: MpvMoviestimState
     _threaded_mode: bool
-    _render_context: ThreadedState | NonThreadedState | None
+    _render_context: TwoThreadedContext | SingleThreadedContext | None
     _mpv_lib: ModuleType
     _player: mpv.MPV
     _flip_horizontal: bool
     _flip_vertical: bool
     _draw_rect: tuple[int, int, int, int] | None  # display rect pix (x, y, w, h)
     _set_size_from_media: bool
+    _suppressing_warnings_in_autodraw: bool
+    # TODO: class docstring, w/ Attributes and init Parameters
     # TODO: _advanced_control: bool
     # TODO: resize! egyelőre mindig ugyanolyan méretben renderelünk az MPV-vel
     # TODO: MPV supports playlists, loop file, loop playlist
+    # TODO: verify audio/display-vdrop modes
 
-    def __init__(
+    def __init__(  # noqa: PLR0913,PLR0915
         self,
         window: visual.Window,
         file: Path | str | None,
@@ -377,12 +377,11 @@ class MpvMoviestim(BaseVisualStim, ContainerMixin):
         keep_aspect_ratio: bool = True,
         mpv_options: dict[str, Any] | None = None,
         double_buffering: bool = True,
-        # TODO: advanced_control: bool = True,
-        # TODO: verify audio/display-vdrop modes
     ):
         # unspecified - not initialized or unknown state
         self._state = MpvMoviestimState.UNSPECIFIED
         logging.info("State set to UNSPECIFIED.")
+        self._suppressing_warnings_in_autodraw = False
 
         # store properties that we need ourselves
         self._window = window
@@ -398,10 +397,10 @@ class MpvMoviestim(BaseVisualStim, ContainerMixin):
 
         # invoke BaseVisualStim constructor
         # autoLog must be False at this point
-        print("pp __init___ called")
         super().__init__(window, units=units, name=name, autoLog=False)
 
         # check for pyglet
+        # TODO: glfw + pyopengl shouldn't be that difficult to add
         if window.winType != "pyglet":
             msg = "MpvMoviesStim can only be used with a pyglet window"
             logging.error(msg)
@@ -417,19 +416,17 @@ class MpvMoviestim(BaseVisualStim, ContainerMixin):
         self.size = size
         print("pp pos, size, anchor, depth, flip called - END")
 
-        # infer FBO information (size, pixel format) for the PsychoPy window
+        # Infer FBO information (size, pixel format) from the PsychoPy window.
         # Resizing controls for the PP window are disabled so target FBO size
         # won't change during playback.
-        self._target_fbo_info = self._infer_target_fbo_info()
-
-        # TODO: add to docs that resizing of the PP window isn't supported
+        # TODO: add to docs that resizing of the PP window isn't supported?
+        self._target_fbo_info = utils.get_psychopy_fbo_info(window)
 
         # **************
         # Configure MPV
         # **************
-        # TODO: advanced control?
 
-        # start from default options
+        # start with default options
         user_mpv_options = mpv_options
         player_options = _mpv_default_options.copy()
 
@@ -451,7 +448,7 @@ class MpvMoviestim(BaseVisualStim, ContainerMixin):
 
         # if monitor fps is provided, request display-vdrop video sync mode
         # user can get fps with: window.getActualFrameRate()
-        # TODO: test if we really get display-vsync by reading PTS from frame info
+        # TODO: verify that we really get display-vsync by reading PTS from frame info
         if monitor_framerate is not None:
             player_options["display-fps-override"] = monitor_framerate
             player_options["video-sync"] = "display-vdrop"
@@ -506,49 +503,6 @@ class MpvMoviestim(BaseVisualStim, ContainerMixin):
 
     @_log_pre_post
     @_state_guard(allowed_state=MpvMoviestimState.UNSPECIFIED)
-    def _infer_target_fbo_info(self) -> dict[str, int]:
-        """Infer size and pixel format of Psychopy's draw surface.
-
-        Depending on whether useFBO is set, PsychoPy either draws to the
-        screen backbuffer or to an intermediate FBO. We need to know the
-        size and pixel format of this target surface in order to properly
-        render video frames.
-
-        Returns
-        -------
-        dict[str, int]
-            A dictionary containing the size and pixel format of the target
-            FBO: {"fbo": int, "w": int, "h": int, "internal_format": int}
-
-        Notes
-        -----
-        - This function activates the Psychopy's window before querying it.
-        """
-        # Activate main window's OpenGL context
-        assert self._window.winHandle is not None
-        pyglet_window: BaseWindow = self._window.winHandle
-        pyglet_window.switch_to()
-        pyglet_window.activate()
-        # TODO: switch_to may be enough, test if activating is necessary
-
-        # Query Psychopy's FBO info
-        psychopy_fbo_info = utils.get_psychopy_fbo_info(self._window)
-
-        # log
-        format_name = (
-            "<undetermined>"
-            if "internal_format" not in psychopy_fbo_info
-            else utils.pixel_format_id_to_name(psychopy_fbo_info["internal_format"])
-        )
-        logging.info(
-            f"Psychopy's rendering FBO: fbo={psychopy_fbo_info['fbo']}, "
-            f"size={psychopy_fbo_info['w']}x{psychopy_fbo_info['h']}, "
-            f"format={format_name}"
-        )
-        return psychopy_fbo_info
-
-    @_log_pre_post
-    @_state_guard(allowed_state=MpvMoviestimState.UNSPECIFIED)
     def _init_nonthreaded_mode(self) -> None:
         """Initialise single-threaded, immediate draw mode.
 
@@ -574,7 +528,7 @@ class MpvMoviestim(BaseVisualStim, ContainerMixin):
         # fbo, tex = self._allocate_intermediate_fbo()
         # TODO: cannot do this until movie is loaded, otherwise no draw_rect! actually now we can but does it make sense?
 
-        self._render_context = NonThreadedState(
+        self._render_context = SingleThreadedContext(
             c_getproc=c_getproc,
             mpv_render_ctx=mpv_render_ctx,
             # intermediate_FBO_info=fbo,
@@ -867,6 +821,8 @@ class MpvMoviestim(BaseVisualStim, ContainerMixin):
             self.size = (0, 0)
         # TODO: self._allocate_buffers()
 
+        self._suppressing_warnings_in_autodraw = False
+
         logging.exp(f"Loaded movie '{file}'.")
 
         if self._autostart:
@@ -943,7 +899,7 @@ class MpvMoviestim(BaseVisualStim, ContainerMixin):
         # wait_for_shutdown() while the worker is still alive.
         if self._threaded_mode:
             logging.info("telling worker thread to stop")
-            ts = cast(ThreadedState, self._render_context)
+            ts = cast(TwoThreadedContext, self._render_context)
             ts.stop_worker_event.set()
             ts.wakeup_worker_trigger.set()  # wake worker if it is blocked on .wait()
             assert ts.worker_thread is not None, (
@@ -959,7 +915,7 @@ class MpvMoviestim(BaseVisualStim, ContainerMixin):
                 )
                 raise RuntimeError("mpv render worker failed to stop")
         else:
-            st = cast(NonThreadedState, self._render_context)
+            st = cast(SingleThreadedContext, self._render_context)
             st.mpv_render_ctx.free()
             if st.intermediate_tex_id is not None:
                 utils.gl_texture_destroy(st.intermediate_tex_id)
@@ -979,15 +935,31 @@ class MpvMoviestim(BaseVisualStim, ContainerMixin):
             ) from e
         # Intermediate FBO/texture cleanup is handled inside the worker thread.
 
+    @override
     def draw(self) -> None:
         # Don't use the guard wrapper here for performance reasons.
-        # TODO: with autoDraw, PsychoPy calls draw() every frame; this warning would flood the log.
-        if self._state != MpvMoviestimState.PLAYING:
+
+        # suppress warnings when autoDraw is enabled, to avoid log flooding
+        being_autodrawn: bool = self.win._toDraw  # pylint: disable=protected-access
+        suppress_warnings: bool = (
+            being_autodrawn and self._suppressing_warnings_in_autodraw
+        )
+        if being_autodrawn and not self._suppressing_warnings_in_autodraw:
             logging.warning(
-                f"Cannot draw(), expected PLAYING state, got {self._state.name}."
+                "AutoDraw enabled, suppressing warnings in future draw() calls."
             )
+            self._suppressing_warnings_in_autodraw = True
+
+        if self._state not in (MpvMoviestimState.PLAYING, MpvMoviestimState.PAUSED):
+            if not suppress_warnings:
+                logging.warning(
+                    f"Cannot draw(), expected PLAYING state, got {self._state.name}."
+                )
+            return
+
         if self._draw_rect is None:
-            logging.error("draw() called but draw rectangle is undefined.")
+            if not suppress_warnings:
+                logging.error("draw() called but draw rectangle is undefined.")
             return
 
         if self._threaded_mode:
@@ -1010,7 +982,7 @@ class MpvMoviestim(BaseVisualStim, ContainerMixin):
         ready-to-render vframes, so this approach only makes sense when
         MPV has to render a new frame on each vsync cycle anyway.
         """
-        if not isinstance(self._render_context, NonThreadedState):
+        if not isinstance(self._render_context, SingleThreadedContext):
             raise TypeError(
                 "Non-threaded draw called but render context is not NonThreadedState."
             )
@@ -1027,10 +999,9 @@ class MpvMoviestim(BaseVisualStim, ContainerMixin):
                 st.intermediate_tex_id = tex_id
                 st.intermediate_FBO_allocated_size = (fbo_info["w"], fbo_info["h"])
             else:
-                logging.warning(
+                raise RuntimeError(
                     "No buffers to render into and no draw rectangle defined, cannot render."
                 )
-                return
 
         # mpv._mpv_render_context_get_info(ctx._handle, frameinfo)
         # video-frame-info
@@ -1155,7 +1126,7 @@ class MpvMoviestim(BaseVisualStim, ContainerMixin):
         update callback (this function), and should be called from the
         "render" thread, which in our case means the worker thread.
         """
-        if isinstance(self._render_context, ThreadedState):
+        if isinstance(self._render_context, TwoThreadedContext):
             print("threaded callback")
             ts = self._render_context
             worker_wakeup_already_triggered = ts.wakeup_worker_trigger.is_set()
@@ -1200,7 +1171,7 @@ class MpvMoviestim(BaseVisualStim, ContainerMixin):
         )
 
         logging.info("Creating shared thread state.")
-        self._render_context = ThreadedState(
+        self._render_context = TwoThreadedContext(
             worker_thread=worker_thread,
             shadow_window=shadow_window,
             c_getproc=c_getproc,
@@ -1273,7 +1244,7 @@ class MpvMoviestim(BaseVisualStim, ContainerMixin):
         then flipped by the main thread.
         """
         # --- one-time init on this thread ---
-        if not isinstance(self._render_context, ThreadedState):
+        if not isinstance(self._render_context, TwoThreadedContext):
             logging.error("Render thread called in non-threaded mode.")
             return
 
@@ -1423,15 +1394,15 @@ class MpvMoviestim(BaseVisualStim, ContainerMixin):
         * If profiling was enabled at construction, this method also records
         per-iteration timestamps; retrieve them with ``get_profiling_data()``.
         """
-        if not isinstance(self._render_context, ThreadedState):
-            logging.error("Threaded draw() called in non-threaded mode.")
-            return
+        if not isinstance(self._render_context, TwoThreadedContext):
+            raise RuntimeError("Threaded draw() called in non-threaded mode.")  #  noqa: TRY004
 
         ts = self._render_context
 
         if ts.intermediate_FBO_infos is None:
-            logging.error("draw() called but intermediate FBOs are not initialized.")
-            return
+            raise RuntimeError(
+                "draw() called but intermediate FBOs are not initialized."
+            )
 
         # the worker thread fills the buffers and indicates when a new one is available
         # if the worker thread is not rendering now, we can flip the buffers immediately

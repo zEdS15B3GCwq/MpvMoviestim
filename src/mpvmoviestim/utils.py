@@ -92,12 +92,12 @@ def get_psychopy_fbo_info(
 
     Notes
     -----
-    * The OpenGL context of the provided window is assumed to be current.
+    * The OpenGL context of the provided window must be current, so this
+      function activates the window before querying it.
     * Typically, PsychoPy's intermediate FBO has the RGBA32F pixel format,
       while the screen backbuffer has something like RGB8.
     * In some cases, atypical internal formats may not be correctly detected,
       in which case the returned info may omit the `internal_format` field.
-
     """
 
     def _get_gl_int(pname: int) -> int:
@@ -105,6 +105,13 @@ def get_psychopy_fbo_info(
         out = ctypes.c_int(0)
         gl.glGetIntegerv(pname, out)
         return out.value
+
+    # Activate main window's OpenGL context
+    assert win.winHandle is not None
+    pyglet_window: BaseWindow = win.winHandle
+    pyglet_window.switch_to()
+    pyglet_window.activate()
+    # TODO: switch_to may be enough, test if activating is necessary
 
     if win.useFBO:
         tex_id: int = win.frameTexture
@@ -149,6 +156,18 @@ def get_psychopy_fbo_info(
     }
     if internal_fmt != 0:
         fbo_info["internal_format"] = internal_fmt
+
+    # log
+    format_name = (
+        "<undetermined>"
+        if "internal_format" not in fbo_info
+        else pixel_format_id_to_name(fbo_info["internal_format"])
+    )
+    logging.info(
+        f"Psychopy's rendering FBO: fbo={fbo_info['fbo']}, "
+        f"size={fbo_info['w']}x{fbo_info['h']}, "
+        f"format={format_name}"
+    )
 
     return fbo_info
 
