@@ -349,7 +349,6 @@ class MpvMoviestim(BaseVisualStim, ContainerMixin):
     _flip_vertical: bool
     _draw_rect: tuple[int, int, int, int] | None  # display rect pix (x, y, w, h)
     _set_size_from_media: bool
-    _suppressing_warnings_in_autodraw: bool
     # TODO: class docstring, w/ Attributes and init Parameters
     # TODO: _advanced_control: bool
     # TODO: resize! egyelőre mindig ugyanolyan méretben renderelünk az MPV-vel
@@ -381,7 +380,6 @@ class MpvMoviestim(BaseVisualStim, ContainerMixin):
         # unspecified - not initialized or unknown state
         self._state = MpvMoviestimState.UNSPECIFIED
         logging.info("State set to UNSPECIFIED.")
-        self._suppressing_warnings_in_autodraw = False
 
         # store properties that we need ourselves
         self._window = window
@@ -558,116 +556,6 @@ class MpvMoviestim(BaseVisualStim, ContainerMixin):
             "opengl",
             opengl_init_params={"get_proc_address": c_getproc},
         )
-        # TODO: advanced_control=self._advanced_control,
-
-    # def _update_draw_rect(self) -> None:
-    #     """Calculate pixel-based bounding rectangle from Psychopy-based size and position.
-
-    #     Psychopy stores position and size in its own units, but we need pixel-based
-    #     ones for OpenGL rendering. This function calculates the bounding rectangle
-    #     [x, y, w, h] in pixels, where (x, y) define the bottom-left corner, and
-    #     (w, h) the display size, and stores it in `self._draw_rect`.
-
-    #     The draw rect is used in the following places:
-    #     - Intermediate FBOs are allocated once after loading media, at media size or
-    #     draw rect size, whichever is larger, to allow resizing during playback up to
-    #     this allocated size. The draw rect's width and height define the area that's
-    #     actually used for image data in the intermediate FBOs for rendering and
-    #     drawing.
-    #     - Both MPV rendering and drawing to PsychoPy's surface use the same image size
-    #     (w, h). This means that MPV's superiour scaling algorithms are used to rescale
-    #     the media instead of doing it with OpenGL's simpler blit.
-
-    #     Notes
-    #     -----
-    #     - Psychopy's window size is in pixels; position and size can be in other units.
-    #     - Non-pixel units are converted using Psychopy's `convertToPix` function.
-    #     - If display size is not given, media size is used if available.
-    #     - If neither size nor media size are available, the draw rect is not updated.
-    #     """
-    #     logging.info(
-    #         f"_bounding rect params: {self._size=}, {self._media_size=}, {self._position=}, {self._window=}, {self._units=}"
-    #     )
-    #     position = self._position
-    #     size = self._size
-    #     media_size = self._media_size
-    #     window = self._window
-
-    #     if size is None and media_size is None:
-    #         logging.warning(
-    #             "Draw size not specified and media size not available,"
-    #             "cannot calculate draw rect."
-    #         )
-    #         return
-
-    #     screen_centre_px: tuple[int, int] = (
-    #         window.size[0] / 2,
-    #         window.size[1] / 2,
-    #     )
-
-    #     # if units are not pix, convert to pixels what's necessary
-    #     if self._units != "pix":
-    #         if size is not None:
-    #             # If display size is provided, calculate bounding rect from it.
-    #             # Get vectors from screen centre to bottom-left/top-right of media in pixels.
-    #             # We directly calculate corner positions to allow for non-rectangular units.
-    #             corners = [
-    #                 (
-    #                     position[0] - size[0] / 2,
-    #                     position[1] - size[1] / 2,
-    #                 ),
-    #                 (
-    #                     position[0] + size[0] / 2,
-    #                     position[1] + size[1] / 2,
-    #                 ),
-    #             ]
-    #             bottom_left_px, top_right_px = cast(
-    #                 tuple[tuple[float, float], tuple[float, float]],
-    #                 convertToPix(
-    #                     pos=[0, 0],
-    #                     vertices=corners,
-    #                     units=self._units,
-    #                     win=window,
-    #                 ),
-    #             )
-    #         else:
-    #             assert media_size is not None  # guaranteed, silences dumb type checkers
-    #             # display size not provided, only convert position to px
-    #             # pos_px: screen centre -> media element centre vector in pixels
-    #             pos_px: tuple[float, float] = convertToPix(
-    #                 pos=[0, 0],
-    #                 vertices=[position],
-    #                 units=self._units,
-    #                 win=window,
-    #             )[0]
-    #             bottom_left_px = (
-    #                 pos_px[0] - media_size[0] / 2,
-    #                 pos_px[1] - media_size[1] / 2,
-    #             )
-    #             top_right_px = (
-    #                 pos_px[0] + media_size[0] / 2,
-    #                 pos_px[1] + media_size[1] / 2,
-    #             )
-    #         # bounding rect absolute coordinates = screen centre position +  corner vectors
-    #         bounding_rect = (
-    #             int(bottom_left_px[0] + screen_centre_px[0]),
-    #             int(bottom_left_px[1] + screen_centre_px[1]),
-    #             int(top_right_px[0] - bottom_left_px[0]),
-    #             int(top_right_px[1] - bottom_left_px[1]),
-    #         )
-    #     else:
-    #         # Everything is in pixels, we only need to decide what display size to use
-    #         size_px = size if size is not None else media_size
-    #         assert size_px is not None
-    #         bounding_rect = (
-    #             int(screen_centre_px[0] + position[0] - size_px[0] / 2),
-    #             int(screen_centre_px[1] + position[1] - size_px[1] / 2),
-    #             int(size_px[0]),
-    #             int(size_px[1]),
-    #         )
-
-    #     logging.info(f"New draw rect: {self._draw_rect}.")
-    #     self._draw_rect = bounding_rect
 
     def _allocate_intermediate_fbo(self) -> tuple[dict[str, int], int]:
         """Allocate one intermediate FBO + backing texture on the current GL context.
@@ -778,7 +666,6 @@ class MpvMoviestim(BaseVisualStim, ContainerMixin):
         ----------
         file : Path | str
             Path to the movie file to load.
-
         """
         # TODO make this work repeatedly
 
@@ -824,8 +711,6 @@ class MpvMoviestim(BaseVisualStim, ContainerMixin):
         if self._set_size_from_media:
             self.size = (0, 0)
         # TODO: self._allocate_buffers()
-
-        self._suppressing_warnings_in_autodraw = False
 
         logging.exp(f"Loaded movie '{file}'.")
 
@@ -945,24 +830,15 @@ class MpvMoviestim(BaseVisualStim, ContainerMixin):
 
         # suppress warnings when autoDraw is enabled, to avoid log flooding
         being_autodrawn: bool = self.win._toDraw  # pylint: disable=protected-access
-        suppress_warnings: bool = (
-            being_autodrawn and self._suppressing_warnings_in_autodraw
-        )
-        if being_autodrawn and not self._suppressing_warnings_in_autodraw:
-            logging.warning(
-                "AutoDraw enabled, suppressing warnings in future draw() calls."
-            )
-            self._suppressing_warnings_in_autodraw = True
-
         if self._state not in (MpvMoviestimState.PLAYING, MpvMoviestimState.PAUSED):
-            if not suppress_warnings:
+            if not being_autodrawn:
                 logging.warning(
                     f"Cannot draw(), expected PLAYING state, got {self._state.name}."
                 )
             return
 
         if self._draw_rect is None:
-            if not suppress_warnings:
+            if not being_autodrawn:
                 logging.error("draw() called but draw rectangle is undefined.")
             return
 
