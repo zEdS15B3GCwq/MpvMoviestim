@@ -1216,6 +1216,8 @@ class MpvMoviestim(BaseVisualStim, ContainerMixin):
                 "h": self._draw_rect[3],
             }
 
+            # TODO: if the same buffer is reused, we need to wait/delete the previous render sync!
+
             # The GPU may be still executing the main thread's blit from this FBO,
             # so we do a GPU-side wait before we overwrite it.
             if (blit_fence := ts.blit_fences[target_idx]) is not None:
