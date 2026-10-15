@@ -55,14 +55,12 @@ from __future__ import annotations
 
 import ctypes
 import dataclasses
-import functools
 import importlib
 import threading
 from concurrent.futures import TimeoutError as FutureTimeoutError
-from enum import Enum, auto
 from pathlib import Path
 from types import ModuleType
-from typing import TYPE_CHECKING, ParamSpec, TypeVar, cast
+from typing import TYPE_CHECKING, cast
 
 import numpy as np
 import pyglet
@@ -75,7 +73,6 @@ from typing_extensions import override
 from . import utils
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
     from typing import Any, Literal
 
     import mpv
@@ -95,92 +92,10 @@ TIMEOUT_DEFAULT_S = 5.0
 # "dither": "fruit",  # already default
 # "audio_exclusive": "yes",
 
-__all__ = ["MpvMoviestim", "MpvMoviestimState"]
-
 # pyglet calls glGetError() after every GL call, and raises an exception
 # when an error is encountered, which is very slow. Disable this for performance
 # here, or run with "python -O".
 pyglet.options["debug_gl"] = False  # disable pyglet's GL error checking
-
-P = ParamSpec("P")
-R = TypeVar("R")
-
-
-def _log_pre_post(func: Callable[P, R]) -> Callable[P, R]:
-    """Decorator to log the player and MPV states before and after method execution."""
-
-    @functools.wraps(func)
-    def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
-        instance: MpvMoviestim = cast(MpvMoviestim, args[0])
-        print(
-            f"PRE {func.__name__}: "  # ty: ignore
-            f"state={instance._state.name}; "  # pylint: disable=protected-access
-            f"mpv={instance.mpv_state.name}"  # pylint: disable=protected-access
-        )
-        result = func(*args, **kwargs)
-        print(
-            f"POST {func.__name__}: "  # ty: ignore
-            f"state={instance._state.name}; "  # pylint: disable=protected-access
-            f"mpv={instance.mpv_state.name}"  # pylint: disable=protected-access
-        )
-        return result
-
-    return wrapper
-
-
-def _state_guard(
-    allowed_state: MpvMoviestimState | list[MpvMoviestimState] | None = None,
-    forbidden_state: MpvMoviestimState | list[MpvMoviestimState] | None = None,
-) -> Callable[[Callable[..., R]], Callable[..., R]]:
-    """Decorator to enforce allowed and forbidden states when running methods."""
-
-    allowed_states = (
-        None
-        if allowed_state is None
-        else [allowed_state]
-        if isinstance(allowed_state, MpvMoviestimState)
-        else allowed_state
-    )
-
-    forbidden_states = (
-        None
-        if forbidden_state is None
-        else [forbidden_state]
-        if isinstance(forbidden_state, MpvMoviestimState)
-        else forbidden_state
-    )
-
-    def decorator(func: Callable[..., R]) -> Callable[..., R]:
-
-        @functools.wraps(func)
-        def wrapper(*args: Any, **kwargs: Any) -> R:
-            instance: MpvMoviestim = args[0]
-            actual_state = instance._state  # pylint: disable=protected-access
-
-            if allowed_states is not None and actual_state not in allowed_states:
-                msg = (
-                    f"'{func.__name__}' failed: state must be one of "  # ty: ignore
-                    f"[{','.join([s.name for s in allowed_states])}], "
-                    f"got {actual_state.name}"
-                )
-                logging.error(msg)
-                raise RuntimeError(msg)
-
-            if forbidden_states is not None and actual_state in forbidden_states:
-                msg = (
-                    f"'{func.__name__}' failed: state must not be one of "  # ty: ignore
-                    f"[{','.join([s.name for s in forbidden_states])}], "
-                    f"got {actual_state.name}"
-                )
-                logging.error(msg)
-                raise RuntimeError(msg)
-
-            return func(*args, **kwargs)
-
-        return wrapper
-
-    return decorator
-
 
 _mpv_default_options: dict[str, Any] = {
     "vo": "libmpv",  # render using the render_context API
@@ -203,17 +118,6 @@ _mpv_default_audio_options: dict[str, Any] = {
     "audio_device": "auto",  # automatically choose audio output device
     # "audio_exclusive": "yes",  # exclusive access to audio device (no other apps can play sound)
 }
-
-
-class MpvMoviestimState(Enum):
-    """Internal state of MPVMoviesStim. Also used for mpv's states."""
-
-    UNSPECIFIED = auto()  # not initialised or unknown state
-    NO_MEDIA = auto()  # MPV core is active, no file loaded
-    PAUSED = auto()  # file loaded but not playing
-    PLAYING = auto()  # playing
-    EOF_REACHED = auto()  # EOF reached
-    SHUTDOWN = auto()  # MPV player core has shut down after quit()
 
 
 @dataclasses.dataclass(slots=True)
@@ -378,7 +282,7 @@ class MpvMoviestim(BaseVisualStim, ContainerMixin):
         draw_mode: Literal["double-buffered", "immediate"] = "double-buffered",
     ):
         # unspecified - not initialized or unknown state
-        self._state = MpvMoviestimState.UNSPECIFIED
+        self._state = utils.PlayerState.UNSPECIFIED
         logging.info("State set to UNSPECIFIED.")
 
         # store properties that we need ourselves
@@ -487,7 +391,7 @@ class MpvMoviestim(BaseVisualStim, ContainerMixin):
         # *******************
         # Initialisation done
         # *******************
-        self._state = MpvMoviestimState.NO_MEDIA
+        self._state = utils.PlayerState.NO_MEDIA
         logging.info("State set to NO_MEDIA.")
 
         # load movie if specified
@@ -503,8 +407,8 @@ class MpvMoviestim(BaseVisualStim, ContainerMixin):
         if autoLog:
             logging.exp(f"Created {self.name} = {self}")
 
-    @_log_pre_post
-    @_state_guard(allowed_state=MpvMoviestimState.UNSPECIFIED)
+    @utils.log_pre_post
+    @utils.state_guard(allowed_state=utils.PlayerState.UNSPECIFIED)
     def _init_nonthreaded_mode(self) -> None:
         """Initialise single-threaded, immediate draw mode.
 
@@ -538,8 +442,8 @@ class MpvMoviestim(BaseVisualStim, ContainerMixin):
             # FBO_allocated_size=(fbo["w"], fbo["h"]),
         )
 
-    @_log_pre_post
-    @_state_guard(allowed_state=MpvMoviestimState.UNSPECIFIED)
+    @utils.log_pre_post
+    @utils.state_guard(allowed_state=utils.PlayerState.UNSPECIFIED)
     def _create_render_context(
         self, c_getproc: ctypes._CFunctionType
     ) -> mpv.MpvRenderContext:
@@ -623,7 +527,7 @@ class MpvMoviestim(BaseVisualStim, ContainerMixin):
     def _mpv_log_fn(self, _level: int, prefix: str, text: str) -> None:
         logging.info(f"MPV({prefix}): {text}")
 
-    @_log_pre_post
+    @utils.log_pre_post
     def _on_eof(self, prop_name: str, value: bool | None) -> None:
         # value -> None at init
         # value -> False when playback starts
@@ -635,7 +539,7 @@ class MpvMoviestim(BaseVisualStim, ContainerMixin):
         )
         if value:
             logging.exp("EOF reached")
-            self._state = MpvMoviestimState.EOF_REACHED
+            self._state = utils.PlayerState.EOF_REACHED
 
     def _on_drop(self, prop_name: str, value: bool | None) -> None:
         print(f"Frame dropped. Property {prop_name} changed to {value}")
@@ -645,7 +549,7 @@ class MpvMoviestim(BaseVisualStim, ContainerMixin):
     #     if event == mpv.MpvEventID.SHUTDOWN:
     #         self._on_shutdown()
 
-    # @log_pre_post
+    # @utils.log_pre_post
     # def _on_shutdown(self) -> None:
     #     print("MPV shutdown")
     #     logging.info("on shutdown called")
@@ -655,9 +559,9 @@ class MpvMoviestim(BaseVisualStim, ContainerMixin):
     #     if hasattr(self, "_intermediate_fbo_info"):
     #         utils.destroy_fbo(self._intermediate_fbo_info["fbo"])
 
-    @_log_pre_post
-    @_state_guard(
-        forbidden_state=[MpvMoviestimState.UNSPECIFIED, MpvMoviestimState.SHUTDOWN]
+    @utils.log_pre_post
+    @utils.state_guard(
+        forbidden_state=[utils.PlayerState.UNSPECIFIED, utils.PlayerState.SHUTDOWN]
     )
     def loadMovie(self, file: Path | str) -> None:
         """Load a movie file into the player, replacing any currently loaded file.
@@ -689,7 +593,7 @@ class MpvMoviestim(BaseVisualStim, ContainerMixin):
             raise RuntimeError(
                 "An error occurred while waiting for MPV to reach a paused state."
             ) from e
-        self._state = MpvMoviestimState.PAUSED
+        self._state = utils.PlayerState.PAUSED
         logging.info("State set to PAUSED.")
 
         # wait for MPV to provide video parameters in order to get height, width, etc.
@@ -722,8 +626,8 @@ class MpvMoviestim(BaseVisualStim, ContainerMixin):
         """Alias for loadMovie()"""
         self.loadMovie(fileName)
 
-    @_log_pre_post
-    @_state_guard(allowed_state=MpvMoviestimState.PAUSED)
+    @utils.log_pre_post
+    @utils.state_guard(allowed_state=utils.PlayerState.PAUSED)
     def play(self, block: bool = False) -> None:
         # TODO: threading state needs to be reset on play() following stop() or loadMovie()
         self._player.pause = False
@@ -734,14 +638,14 @@ class MpvMoviestim(BaseVisualStim, ContainerMixin):
                 raise RuntimeError(
                     "An error occurred while waiting for MPV to start playing."
                 ) from e
-        self._state = MpvMoviestimState.PLAYING
+        self._state = utils.PlayerState.PLAYING
         logging.exp(
             "State change: PAUSED -> PLAYING"
             f"(self state={self._state.name}, MPV state={self.mpv_state.name})"
         )
 
-    @_log_pre_post
-    @_state_guard(allowed_state=MpvMoviestimState.PLAYING)
+    @utils.log_pre_post
+    @utils.state_guard(allowed_state=utils.PlayerState.PLAYING)
     def pause(self, block: bool = False) -> None:
         self._player.pause = True
         if block:
@@ -751,22 +655,22 @@ class MpvMoviestim(BaseVisualStim, ContainerMixin):
                 raise RuntimeError(
                     "An error occurred while waiting for MPV to pause."
                 ) from e
-        self._state = MpvMoviestimState.PAUSED
+        self._state = utils.PlayerState.PAUSED
         logging.exp(
             "State change: PLAYING -> PAUSED"
             f"(self state={self._state.name}, MPV state={self.mpv_state.name})"
         )
 
-    @_log_pre_post
-    @_state_guard(
+    @utils.log_pre_post
+    @utils.state_guard(
         allowed_state=[
-            MpvMoviestimState.PAUSED,
-            MpvMoviestimState.PLAYING,
-            MpvMoviestimState.EOF_REACHED,
+            utils.PlayerState.PAUSED,
+            utils.PlayerState.PLAYING,
+            utils.PlayerState.EOF_REACHED,
         ]
     )
     def stop(self) -> None:
-        self._state = MpvMoviestimState.SHUTDOWN
+        self._state = utils.PlayerState.SHUTDOWN
         # TODO: instead of shutting down, we could just unload the movie to allow playing another
         logging.exp(f"frame-drop-count: {self._player.frame_drop_count}")
 
@@ -830,7 +734,7 @@ class MpvMoviestim(BaseVisualStim, ContainerMixin):
 
         # suppress warnings when autoDraw is enabled, to avoid log flooding
         being_autodrawn: bool = self.win._toDraw  # pylint: disable=protected-access
-        if self._state not in (MpvMoviestimState.PLAYING, MpvMoviestimState.PAUSED):
+        if self._state not in (utils.PlayerState.PLAYING, utils.PlayerState.PAUSED):
             if not being_autodrawn:
                 logging.warning(
                     f"Cannot draw(), expected PLAYING state, got {self._state.name}."
@@ -938,7 +842,7 @@ class MpvMoviestim(BaseVisualStim, ContainerMixin):
             self._flip_vertical,
         )
 
-    @_state_guard(allowed_state=MpvMoviestimState.PLAYING)
+    @utils.state_guard(allowed_state=utils.PlayerState.PLAYING)
     def report_swap(self) -> None:
         """Report a screen buffer swap to MPV.
 
@@ -965,25 +869,21 @@ class MpvMoviestim(BaseVisualStim, ContainerMixin):
             self._render_context.mpv_render_ctx.report_swap()
 
     @property
-    def state(self) -> MpvMoviestimState:
-        return self._state
-
-    @property
     def mpv_state(self) -> MpvMoviestimState:  # noqa: PLR0911
         if not hasattr(self, "_player") or self._player is None:
-            return MpvMoviestimState.UNSPECIFIED
+            return utils.PlayerState.UNSPECIFIED
         if self._player.core_shutdown:  # True after SHUTDOWN event (quit etc.)
-            return MpvMoviestimState.SHUTDOWN
+            return utils.PlayerState.SHUTDOWN
         if self._player.pause:  # True if paused
-            return MpvMoviestimState.PAUSED
+            return utils.PlayerState.PAUSED
         if self._player.idle_active:  # True when no media is loaded in IDLE mode
-            return MpvMoviestimState.NO_MEDIA
+            return utils.PlayerState.NO_MEDIA
         # True on EOF (needs keep-open otherwise player plays or quits)
         if self._player.eof_reached:
-            return MpvMoviestimState.EOF_REACHED
+            return utils.PlayerState.EOF_REACHED
         if not self._player.core_idle:  # False when no video is playing
-            return MpvMoviestimState.PLAYING
-        return MpvMoviestimState.UNSPECIFIED
+            return utils.PlayerState.PLAYING
+        return utils.PlayerState.UNSPECIFIED
 
     def _mpv_update_callback(self) -> None:
         """Called by MPV when a new frame may be ready.
@@ -1019,8 +919,8 @@ class MpvMoviestim(BaseVisualStim, ContainerMixin):
     # Threaded mode
     # ------------------------------------------------------------------
 
-    @_log_pre_post
-    @_state_guard(allowed_state=MpvMoviestimState.UNSPECIFIED)
+    @utils.log_pre_post
+    @utils.state_guard(allowed_state=utils.PlayerState.UNSPECIFIED)
     def _init_threaded_mode(self) -> None:
         """Initialise threaded, double-buffered drawing mode.
 

@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import ctypes
+import functools
 import importlib
-from typing import TYPE_CHECKING
+from enum import Enum, auto
+from typing import TYPE_CHECKING, ParamSpec, TypeVar, cast
 
 import pyglet
 import pyglet.window
@@ -11,6 +13,7 @@ from psychopy import logging
 from pyglet import gl
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from types import ModuleType
     from typing import Any
 
@@ -618,3 +621,110 @@ def windows_set_process_dpi_awareness(level: bool | int = True):
         logging.info(f"Windows process DPI awareness context set to {level}")
     except Exception as e:  # pylint: disable=W0718  #  noqa: BLE001
         logging.error(f"Error when setting process DPI awareness context: {e}")
+
+
+P = ParamSpec("P")
+R = TypeVar("R")
+
+
+def log_pre_post(func: Callable[P, R]) -> Callable[P, R]:
+    """Decorator to log the player and MPV states before and after method execution."""
+
+    @functools.wraps(func)
+    def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
+        instance: MpvMoviestim = cast(MpvMoviestim, args[0])
+        print(
+            f"PRE {func.__name__}: "  # ty: ignore
+            f"state={instance._state.name}; "  # pylint: disable=protected-access
+            f"mpv={instance.mpv_state.name}"  # pylint: disable=protected-access
+        )
+        result = func(*args, **kwargs)
+        print(
+            f"POST {func.__name__}: "  # ty: ignore
+            f"state={instance._state.name}; "  # pylint: disable=protected-access
+            f"mpv={instance.mpv_state.name}"  # pylint: disable=protected-access
+        )
+        return result
+
+    return wrapper
+
+
+class StatefulMixin:
+    """Mixin class to provide state management for a player."""
+
+    _state: PlayerState
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        print("StatefulMixin.__init__()")
+        super().__init__(*args, **kwargs)
+        self._state = PlayerState.UNSPECIFIED
+
+    @property
+    def state(self) -> PlayerState:
+        """Get the current player state."""
+        return self._state
+
+
+def state_guard(
+    allowed_state: PlayerState | list[PlayerState] | None = None,
+    forbidden_state: PlayerState | list[PlayerState] | None = None,
+) -> Callable[[Callable[..., R]], Callable[..., R]]:
+    """Decorator to enforce allowed and forbidden states when running methods."""
+
+    allowed_states = (
+        None
+        if allowed_state is None
+        else [allowed_state]
+        if isinstance(allowed_state, PlayerState)
+        else allowed_state
+    )
+
+    forbidden_states = (
+        None
+        if forbidden_state is None
+        else [forbidden_state]
+        if isinstance(forbidden_state, PlayerState)
+        else forbidden_state
+    )
+
+    def decorator(func: Callable[..., R]) -> Callable[..., R]:
+
+        @functools.wraps(func)
+        def wrapper(*args: Any, **kwargs: Any) -> R:
+            instance: MpvMoviestim = args[0]
+            actual_state = instance._state  # pylint: disable=protected-access
+
+            if allowed_states is not None and actual_state not in allowed_states:
+                msg = (
+                    f"'{func.__name__}' failed: state must be one of "  # ty: ignore
+                    f"[{','.join([s.name for s in allowed_states])}], "
+                    f"got {actual_state.name}"
+                )
+                logging.error(msg)
+                raise RuntimeError(msg)
+
+            if forbidden_states is not None and actual_state in forbidden_states:
+                msg = (
+                    f"'{func.__name__}' failed: state must not be one of "  # ty: ignore
+                    f"[{','.join([s.name for s in forbidden_states])}], "
+                    f"got {actual_state.name}"
+                )
+                logging.error(msg)
+                raise RuntimeError(msg)
+
+            return func(*args, **kwargs)
+
+        return wrapper
+
+    return decorator
+
+
+class PlayerState(Enum):
+    """Player internal states."""
+
+    UNSPECIFIED = auto()  # not initialised or unknown state
+    NO_MEDIA = auto()  # MPV core is active, no file loaded
+    PAUSED = auto()  # file loaded but not playing
+    PLAYING = auto()  # playing
+    EOF_REACHED = auto()  # EOF reached
+    SHUTDOWN = auto()  # MPV player core has shut down after quit()
