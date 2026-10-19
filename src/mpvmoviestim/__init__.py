@@ -1,5 +1,3 @@
-from .mpvmoviestim import MpvMoviestim
-from .utils import PlayerState
+from .mpvmoviestim import MpvMoviestim, MpvMoviestimState
 
-MpvMoviestimState = PlayerState
 __all__ = ["MpvMoviestim", "MpvMoviestimState"]
