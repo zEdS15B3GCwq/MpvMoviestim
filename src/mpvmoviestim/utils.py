@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import ctypes
 import importlib
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypeVar
 
 import pyglet
 import pyglet.window
@@ -11,12 +11,15 @@ from psychopy import logging
 from pyglet import gl
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from types import ModuleType
     from typing import Any
 
     from mpv import MpvRenderContext
     from psychopy import visual
     from pyglet.window import BaseWindow
+
+T = TypeVar("T")
 
 _PIXEL_FORMAT_MAP: dict[int, tuple[int, int, str]] = {
     int(getattr(gl, "GL_RGBA32F", 0x8814)): (gl.GL_RGBA, gl.GL_FLOAT, "RGBA32F"),
@@ -618,3 +621,39 @@ def windows_set_process_dpi_awareness(level: bool | int = True):
         logging.info(f"Windows process DPI awareness context set to {level}")
     except Exception as e:  # pylint: disable=W0718  #  noqa: BLE001
         logging.error(f"Error when setting process DPI awareness context: {e}")
+
+
+def find_parent_properties(
+    cls: type[T], prop_names: list[str]
+) -> dict[str, Callable[[T, Any], None]]:
+    """Find property setters in parent classes of a given class.
+
+    Parameters
+    ----------
+    cls : type
+        The class to inspect.
+    prop_names : list[str]
+        List of property names to look for in parent classes.
+
+    Returns
+    -------
+    dict[str, Callable[[T, Any], None]]
+        A dictionary mapping property names to their corresponding property
+        object setters (e.g. size.setter(self, value)) found in parent classes.
+        Properties without setters are ignored.
+    """
+    parent_prop_setters: dict[str, Callable[[T, Any], None]] = {}
+    mro = cls.__mro__
+    start_index = mro.index(cls)
+    for propname in prop_names:
+        for parent_cls in mro[start_index + 1 :]:
+            prop = vars(parent_cls).get(propname)
+            if prop is not None and getattr(prop, "fset", None) is not None:
+                parent_prop_setters[propname] = prop.fset
+                break  # Stop searching after finding the first setter
+        else:
+            logging.warning(
+                f"Property '{propname}' setter not found in parent classes"
+                f" of '{cls.__name__}'"
+            )
+    return parent_prop_setters

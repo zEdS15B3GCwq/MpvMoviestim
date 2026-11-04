@@ -67,7 +67,7 @@ from typing import TYPE_CHECKING, ParamSpec, TypeVar, cast
 import numpy as np
 import pyglet
 from psychopy import logging, visual
-from psychopy.layout import Size, Vector
+from psychopy.layout import Vector
 from psychopy.visual.basevisual import BaseVisualStim, ContainerMixin, WindowMixin
 from pyglet import gl
 from typing_extensions import override
@@ -80,6 +80,7 @@ if TYPE_CHECKING:
 
     import mpv
     from pyglet.window import BaseWindow
+    from typing_extensions import Self
 
 
 TIMEOUT_DEFAULT_S = 5.0
@@ -187,7 +188,7 @@ _mpv_default_options: dict[str, Any] = {
     "hwdec": "auto-safe",  # automatically choose H/W decoding pipeline
     "gpu_api": "opengl",  # use OpenGL API
     "keep-open": "always",  # don't stop when playback ends (EOF reached, no loop and no more files)
-    # "keep-open-pause": "yes",  # default yes, pause when playback ends and kee-open is set
+    # "keep-open-pause": "yes",  # default yes, pause when playback ends and keep-open is set
     "pause": True,  # start paused
     "idle": True,  # do not quit when there is no file to play
     # "wid": 0,  # do not create a new window (implied by other settings)
@@ -217,21 +218,38 @@ class MpvMoviestimState(Enum):
 
 
 @dataclasses.dataclass(slots=True)
+class FrameBuffer:
+    """Information about an intermediate FBO buffer.
+
+    Attributes
+    ----------
+    fbo_info : dict[str, int]
+        Information about the FBO, including its ID, width, height, and
+        internal format. Must follow the mpv.MpvOpenGLFBO structure.
+    tex_id : int
+        The OpenGL texture ID associated with the FBO.
+    max_size : tuple[int, int]
+        The maximum size that can be stored in this FBO (width, height).
+        Equal to the allocation size of the FBO.
+    current_frame_size : tuple[int, int] | None
+        The size of the image currently stored in the FBO (width, height).
+        None if the FBO is not being used. Used size <= max size.
+    """
+
+    fbo_info: dict[str, int]
+    tex_id: int
+    max_size: tuple[int, int]
+    current_frame_size: tuple[int, int] | None = None
+
+
+@dataclasses.dataclass(slots=True)
 class SingleThreadedContext:
     """Core objects related to single-threaded, immediate draw mode."""
 
     # context objects for rendering
     c_getproc: ctypes._CFunctionType
     mpv_render_ctx: mpv.MpvRenderContext
-
-    # draw buffer
-    intermediate_FBO_info: dict[str, int] | None = None  # mpv.MpvOpenGLFBO
-    intermediate_tex_id: int | None = None
-    # Size of FBO on allocation, need to reallocate if size exceeds this.
-    intermediate_FBO_allocated_size: tuple[int, int] | None = None
-    # Size of the image stored in the FBO
-    # may differ from draw_rect if stim is resized during playback
-    FBO_frame_render_size: tuple[int, int] | None = None
+    draw_buffer: FrameBuffer
 
 
 @dataclasses.dataclass(slots=True)
@@ -300,16 +318,13 @@ class TwoThreadedContext:
     mpv_render_ctx: mpv.MpvRenderContext | None = None
 
     # Double buffering
-    intermediate_FBO_infos: tuple[dict[str, int], dict[str, int]] | None = None
-    intermediate_FBO_textures: tuple[int, int] | None = None
-    intermediate_FBO_allocated_sizes: tuple[tuple[int, int], tuple[int, int]] | None = (
-        None
-    )
-    FBO_frame_render_sizes: tuple[tuple[int, int], tuple[int, int]] | None = None
+    draw_buffers: tuple[FrameBuffer, FrameBuffer] | None = None
     present_fbo_idx: int = -1
     worker_fbo_idx: int = 0
+    buffer_flip_required: bool = False
 
     # Synchronisation
+    buffer_fbo_lock: threading.Lock = dataclasses.field(default_factory=threading.Lock)
     wakeup_worker_trigger: threading.Event = dataclasses.field(
         default_factory=threading.Event
     )
@@ -323,8 +338,6 @@ class TwoThreadedContext:
     worker_render_done: threading.Event = dataclasses.field(
         default_factory=threading.Event
     )
-    buffer_flip_required: bool = False
-    buffer_fbo_lock: threading.Lock = dataclasses.field(default_factory=threading.Lock)
     render_fences: list[Any] = dataclasses.field(default_factory=lambda: [None, None])
     blit_fences: list[Any] = dataclasses.field(default_factory=lambda: [None, None])
 
@@ -332,12 +345,17 @@ class TwoThreadedContext:
 class MpvMoviestim(BaseVisualStim, ContainerMixin):
     # PsychoPy
     _window: visual.Window
-    _monitor_framerate: float | None  # display-vdrop sync mode active if provided
+    _userprovided_monitor_framerate: (
+        float | None
+    )  # display-vdrop sync mode active if provided
     _target_fbo_info: dict[str, int]  # mpv.MpvOpenGLFBO
+    _parent_prop_setters: dict[
+        str, Callable[[Self, Any], None]
+    ]  # property setters from parent classes
     # Media
     _loaded_movie: Path | None
     _autostart: bool
-    _media_size: tuple[int, int] | None
+    # _media_size: tuple[int, int] | None
     _mpv_options: dict[str, Any]
     # Core
     _state: MpvMoviestimState
@@ -348,7 +366,6 @@ class MpvMoviestim(BaseVisualStim, ContainerMixin):
     _flip_horizontal: bool
     _flip_vertical: bool
     _draw_rect: tuple[int, int, int, int] | None  # display rect pix (x, y, w, h)
-    _set_size_from_media: bool
     # TODO: class docstring, w/ Attributes and init Parameters
     # TODO: _advanced_control: bool
     # TODO: resize! egyelőre mindig ugyanolyan méretben renderelünk az MPV-vel
@@ -383,11 +400,10 @@ class MpvMoviestim(BaseVisualStim, ContainerMixin):
 
         # store properties that we need ourselves
         self._window = window
-        self._media_size = None
+        # self._media_size = None
         self._draw_rect = None
         self._autostart = autoStart
-        self._monitor_framerate = monitor_framerate
-        self._set_size_from_media = False  # set in self.size assignment
+        self._userprovided_monitor_framerate = monitor_framerate
 
         # ******************************
         # Psychopy-related configuration
@@ -403,6 +419,13 @@ class MpvMoviestim(BaseVisualStim, ContainerMixin):
             msg = "MpvMoviesStim can only be used with a pyglet window"
             logging.error(msg)
             raise RuntimeError(msg)
+
+        # Find parent properties safely in MRO.
+        # This is done to avoid hard-coding PsychoPy dependencies as they may
+        # change in the future. The overrides of these properties in this class
+        # will call the parent property setters to ensure proper behavior.
+        prop_names = ["vertices", "pos", "size", "anchor", "flip", "units"]
+        self._parent_prop_setters = utils.find_parent_properties(type(self), prop_names)
 
         # configure properties handled by PsychoPy mixin classes
         print("pp pos, size, anchor, depth, flip called")
@@ -474,7 +497,7 @@ class MpvMoviestim(BaseVisualStim, ContainerMixin):
         # initialise threaded, double-buffered or single-threaded, immediate draw mode
         match draw_mode:
             case "double-buffered":
-                self._treaded_mode = True
+                self._threaded_mode = True
                 self._init_threaded_mode()
             case "immediate":
                 self._threaded_mode = False
@@ -707,9 +730,6 @@ class MpvMoviestim(BaseVisualStim, ContainerMixin):
             )
         self._media_size = video_params["w"], video_params["h"]
 
-        # update pixel-based draw rect
-        if self._set_size_from_media:
-            self.size = (0, 0)
         # TODO: self._allocate_buffers()
 
         logging.exp(f"Loaded movie '{file}'.")
@@ -1500,7 +1520,7 @@ class MpvMoviestim(BaseVisualStim, ContainerMixin):
     def pos(self) -> Any:
         """Returns the position of the visual stimulus in PsychoPy units.
 
-        See PsychoPy's documentation for details.
+        See the PsychoPy documentation for details.
         """
         print(f"pos getter called, returns {super().pos}")
         return super().pos
@@ -1511,7 +1531,7 @@ class MpvMoviestim(BaseVisualStim, ContainerMixin):
     def pos(self, value: Any) -> None:
         """Sets the position of the visual stimulus in PsychoPy units.
 
-        See PsychoPy's documentation for details.
+        See the PsychoPy documentation for details.
         """
         vars(BaseVisualStim)["pos"].__set__(self, value)  # pylint: disable=unnecessary-dunder-call
         # BaseVisualStim.pos.fset(self, value)
@@ -1523,7 +1543,7 @@ class MpvMoviestim(BaseVisualStim, ContainerMixin):
     def size(self) -> Any:
         """Returns the display size of the stimulus in PsychoPy units.
 
-        See PsychoPy's documentation for details.
+        See the PsychoPy documentation for details.
         """
         print(f"size getter called, returns {super().size}")
         return super().size
@@ -1534,26 +1554,9 @@ class MpvMoviestim(BaseVisualStim, ContainerMixin):
     def size(self, value: Any) -> None:
         """Sets the display size of the stimulus in PsychoPy units.
 
-        If the value is zero (a single zero or a tuple of zeros (0, 0)), the
-        stimulus will be drawn at the media's native size. Otherwise, see
-        PsychoPy's documentation for details.
+        See the PsychoPy documentation for details.
         """
-        if (isinstance(value, (int, float)) and value == 0) or (
-            isinstance(value, (tuple, list))
-            and len(value) == 2
-            and value[0] == 0
-            and value[1] == 0
-        ):
-            self._set_size_from_media = True
-            # Without media yet, None is a placeholder; loadMovie re-applies the request.
-            if self._media_size is not None:
-                vars(BaseVisualStim)["size"].__set__(  # pylint: disable=unnecessary-dunder-call
-                    self, Size(self._media_size, units="pix", win=self.win)
-                )
-        else:
-            self._set_size_from_media = False
-            vars(BaseVisualStim)["size"].__set__(self, value)  # pylint: disable=unnecessary-dunder-call
-            # BaseVisualStim.size.fset(self, value)
+        vars(BaseVisualStim)["size"].__set__(self, value)  # pylint: disable=unnecessary-dunder-call
         self._refresh_draw_rect()
         print(f"size setter called, {value=}")
 
@@ -1563,7 +1566,7 @@ class MpvMoviestim(BaseVisualStim, ContainerMixin):
     def anchor(self) -> Any:
         """Returns the anchor point of the visual stimulus.
 
-        See PsychoPy's documentation for details.
+        See the PsychoPy documentation for details.
         """
         print(f"anchor getter called, returns {super().anchor}")
         return super().anchor
@@ -1575,7 +1578,7 @@ class MpvMoviestim(BaseVisualStim, ContainerMixin):
         """Sets the anchor point of the visual stimulus.
 
         Triggers a shape update that is missing in the parent classes.
-        See PsychoPy's documentation for details.
+        See the PsychoPy documentation for details.
         """
         # WindowMixin.anchor.fset(self, value)
         vars(WindowMixin)["anchor"].__set__(self, value)  # pylint: disable=unnecessary-dunder-call
@@ -1588,7 +1591,7 @@ class MpvMoviestim(BaseVisualStim, ContainerMixin):
     def flip(self) -> Any:
         """Returns the flip state of the visual stimulus.
 
-        See PsychoPy's documentation for details.
+        See the PsychoPy documentation for details.
         """
         print(f"flip getter called, returns {super().flip}")
         # return WindowMixin.flip.fget(self)
@@ -1599,7 +1602,7 @@ class MpvMoviestim(BaseVisualStim, ContainerMixin):
     def flip(self, value: Any) -> None:
         """Sets the flip state of the visual stimulus.
 
-        See PsychoPy's documentation for details.
+        See the PsychoPy documentation for details.
         """
         # WindowMixin.flip.fset(self, value)
         vars(WindowMixin)["flip"].__set__(self, value)  # pylint: disable=unnecessary-dunder-call
@@ -1611,7 +1614,7 @@ class MpvMoviestim(BaseVisualStim, ContainerMixin):
     def units(self) -> Any:
         """Returns the units of the visual stimulus.
 
-        See PsychoPy's documentation for details.
+        See the PsychoPy documentation for details.
         """
         # return WindowMixin.units.fget(self)
         print(f"units getter called, returns {super().units}")
@@ -1622,9 +1625,15 @@ class MpvMoviestim(BaseVisualStim, ContainerMixin):
     def units(self, value: Any) -> None:
         """Sets the units of the visual stimulus.
 
-        See PsychoPy's documentation for details.
+        See the PsychoPy documentation for details.
         """
         # WindowMixin.units.fset(self, value)
-        vars(WindowMixin)["units"].__set__(self, value)  # pylint: disable=unnecessary-dunder-call
+        # vars(WindowMixin)["units"].__set__(self, value)  # pylint: disable=unnecessary-dunder-call
+        self._parent_prop_setters["units"](
+            self, value
+        )  # call parent setter to update internal state
         self._refresh_draw_rect()
         print(f"units setter called, {value=}")
+
+
+n
