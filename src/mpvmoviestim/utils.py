@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import ctypes
+import ctypes.util
+import functools
 import importlib
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, TypeAlias, TypeVar
@@ -13,10 +15,8 @@ from pyglet import gl
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from types import ModuleType
     from typing import Any
 
-    from mpv import MpvRenderContext
     from psychopy import visual
     from pyglet.window import BaseWindow
 
@@ -38,11 +38,13 @@ _GL_RGBA32F = int(getattr(gl, "GL_RGBA32F", 0x8814))
 _GL_RGBA_FLOAT_MODE_ARB = 0x8820
 
 # Pixel format -> (incoming format, incoming pixel type, name) for texture allocation
+# * Half floats are allocated with GL_FLOAT: no data is uploaded, and GL_HALF_FLOAT
+#   as incoming type needs ARB_half_float_pixel, which legacy contexts may lack.
 _PIXEL_FORMAT_MAP: dict[int, tuple[int, int, str]] = {
     _GL_RGBA32F: (gl.GL_RGBA, gl.GL_FLOAT, "RGBA32F"),
     _GL_RGB32F: (gl.GL_RGB, gl.GL_FLOAT, "RGB32F"),
-    _GL_RGBA16F: (gl.GL_RGBA, gl.GL_HALF_FLOAT, "RGBA16F"),
-    _GL_RGB16F: (gl.GL_RGB, gl.GL_HALF_FLOAT, "RGB16F"),
+    _GL_RGBA16F: (gl.GL_RGBA, gl.GL_FLOAT, "RGBA16F"),
+    _GL_RGB16F: (gl.GL_RGB, gl.GL_FLOAT, "RGB16F"),
     _GL_RGBA8: (gl.GL_RGBA, gl.GL_UNSIGNED_BYTE, "RGBA8"),
     _GL_RGB8: (gl.GL_RGB, gl.GL_UNSIGNED_BYTE, "RGB8"),
     _GL_RGB10_A2: (gl.GL_RGBA, gl.GL_UNSIGNED_INT_2_10_10_10_REV, "RGB10_A2"),
@@ -101,6 +103,9 @@ _DITHER_DEPTH_MAP: dict[int, DitherDepth] = {
     _GL_RGB32F: "no",
     _GL_RGBA32F: "no",
 }
+
+# Failure values that some Windows drivers return from wglGetProcAddress instead of NULL
+_INVALID_PROC_ADDRESSES = frozenset((1, 2, 3, ctypes.c_void_p(-1).value))
 
 # Used when a pixel format can't be determined
 _DEFAULT_INTERMEDIATE_FORMAT = _GL_RGBA8
@@ -357,10 +362,74 @@ def recommend_dithering_depth(env: PsychoPyRenderingEnvironment) -> DitherDepth:
     return _DITHER_DEPTH_MAP.get(env.screen_format, _DEFAULT_DITHER_DEPTH)
 
 
+@functools.cache
+def _gl_proc_lookup() -> tuple[Any, tuple[Callable[[bytes], int | None], ...]]:
+    """Return the platform's GL library and its get_proc_address functions.
+
+    Uses pyglet's internal OS-specific `pyglet.gl.lib_*` modules. The
+    get_proc_address functions are private ctypes prototypes, so pyglet's own
+    function objects (used for its lazy extension loading) are left untouched.
+    The result is cached, the lookup runs once per process.
+
+    Returns
+    -------
+    tuple
+        GL library (ctypes library, or None if unavailable), and the
+        get_proc_address functions (possibly empty).
+    """
+    platform = pyglet.compat_platform
+
+    # Windows
+    if platform in ("win32", "cygwin"):
+        pyglet_lib_name = "pyglet.gl.lib_wgl"
+        getprocaddress_func_names: tuple[str, ...] = ("wglGetProcAddress",)
+        functype = ctypes.WINFUNCTYPE  # ty: ignore[unresolved-attribute]
+
+    # Linux
+    elif platform.startswith("linux"):
+        pyglet_lib_name = "pyglet.gl.lib_glx"
+        getprocaddress_func_names = ("glXGetProcAddressARB", "glXGetProcAddress")
+        functype = ctypes.CFUNCTYPE
+
+    # macOS: all GL functions are exported by the OpenGL framework
+    elif platform == "darwin":
+        pyglet_lib_name = "pyglet.gl.lib_agl"
+        getprocaddress_func_names = ()
+        functype = ctypes.CFUNCTYPE
+
+    else:
+        logging.error(
+            "Unsupported platform. Expected Windows (win32), Linux (linux), "
+            f"macOS (darwin), got: {platform}"
+        )
+        return None, ()
+
+    # import platform-specific pyglet lib
+    try:
+        pyglet_lib = importlib.import_module(pyglet_lib_name)
+    except ImportError:
+        logging.error(
+            f"Pyglet's platform-specific OpenGL library {pyglet_lib_name} not found"
+        )
+        return None, ()
+
+    gl_lib = getattr(pyglet_lib, "gl_lib", None)
+    if gl_lib is None:
+        logging.error(f"{pyglet_lib_name} has no OpenGL library")
+        return None, ()
+
+    getters: list[Callable[[bytes], int | None]] = []
+    prototype = functype(ctypes.c_void_p, ctypes.c_char_p)
+    for func_name in getprocaddress_func_names:
+        try:
+            getters.append(prototype((func_name, gl_lib)))
+        except (AttributeError, TypeError):
+            continue
+    return gl_lib, tuple(getters)
+
+
 def _resolve_gl_proc_with_pyglet(name: bytes) -> int:
     """Resolve GL function name to pointer using pyglet backends.
-
-    Uses pyglet's internal OS-specific `pyglet.gl.lib_*` modules.
 
     Parameters
     ----------
@@ -371,91 +440,47 @@ def _resolve_gl_proc_with_pyglet(name: bytes) -> int:
     -------
     int
         proc address or 0 if not available or on error
+
+    Notes
+    -----
+    mpv resolves hundreds of functions and probes optional extensions, so
+    lookups and misses are only logged at debug level.
     """
-    name_bytes = name
-    name_str = name_bytes.decode("utf-8", errors="ignore") or None
-
-    platform = pyglet.compat_platform
-
-    def _try_lib_export(lib: ModuleType, name: str) -> int | None:
-        func = getattr(lib, name, None)
-        if func is not None:
-            try:
-                val = ctypes.cast(func, ctypes.c_void_p).value
-            except (TypeError, ValueError, AttributeError):
-                # try attribute fallback
-                val = getattr(func, "value", None)
-            if val is not None:
-                return int(val)
-        return None
-
-    logging.info(
-        f"Resolving OpenGL function {name_str} using pyglet backend for platform {platform}"
-    )
-    getprocaddress_func_names: list[str] = []
-
-    # Windows
-    if platform in ("win32", "cygwin"):
-        pyglet_lib_name = "pyglet.gl.lib_wgl"
-        getprocaddress_func_names = ["wglGetProcAddress"]
-
-    # Linux
-    elif platform.startswith("linux"):
-        pyglet_lib_name = "pyglet.gl.lib_glx"
-        getprocaddress_func_names = ["glXGetProcAddressARB", "glXGetProcAddress"]
-
-    # macOS
-    elif platform == "darwin":
-        pyglet_lib_name = "pyglet.gl.lib_agl"
-
-    else:
-        logging.error(
-            "Unsupported platform. Expected Windows (win32), Linux (linux), "
-            f"macOS (darwin), got: {platform}"
-        )
+    gl_lib, getters = _gl_proc_lookup()
+    if gl_lib is None:
         return 0
 
-    # import platfofm-specific pyglet lib, fail with 0 if not successful
+    # plan A: function exported by the GL library (on Windows, only GL 1.1 is).
+    # Indexing creates a new function object, unlike getattr, which caches it
+    # on the shared library object.
+    name_str = name.decode("ascii", errors="ignore")
     try:
-        pyglet_lib = importlib.import_module(pyglet_lib_name)
-    except ImportError:
-        logging.error(
-            f"Pyglet's platform-specific OpenGL library {pyglet_lib_name} not found"
-        )
-        return 0
+        addr = ctypes.cast(gl_lib[name_str], ctypes.c_void_p).value
+    except (AttributeError, TypeError, ValueError):
+        addr = None
+    if addr:
+        return int(addr)
 
-    # plan A: check if func is exposed as attribute of gl_lib
-    if name_str is not None:
-        gl_lib = getattr(pyglet_lib, "gl_lib", None)
-        if gl_lib is not None:
-            addr = _try_lib_export(gl_lib, name_str)
-            if addr is not None:
-                return addr
+    # plan B: call get_proc_address func(s)
+    for getter in getters:
+        try:
+            addr = getter(name)
+        except OSError:
+            continue
+        if addr and addr not in _INVALID_PROC_ADDRESSES:
+            return int(addr)
 
-    # plan B: call get_proc_address func(s) in library
-    for func_name in getprocaddress_func_names:
-        func = getattr(pyglet_lib, func_name, None)
-        if func is not None:
-            try:
-                func.argtypes = [ctypes.c_char_p]
-                func.restype = ctypes.c_void_p
-                addr = func(name_bytes)
-                if addr:
-                    return int(addr)
-            except (TypeError, OSError):
-                continue
-
-    logging.error(f"Proc address for OpenGL function {name_str} not found")
+    logging.debug(f"Proc address for OpenGL function {name_str} not found")
     return 0
 
 
-def get_gl_proc_address(_ctx: MpvRenderContext, name: bytes) -> int:
+def get_gl_proc_address(_ctx: Any, name: bytes) -> int:
     """Return GL function address, or 0 if not available or on error.
 
     Parameters
     ----------
-    _ctx : OpenGL context
-
+    _ctx : Any
+        Opaque `get_proc_address_ctx` pointer passed through by mpv (unused).
     name : bytes
         OpenGL function name
 
@@ -471,7 +496,7 @@ def get_gl_proc_address(_ctx: MpvRenderContext, name: bytes) -> int:
         return 0
 
 
-def gl_texture_create(w: int, h: int, internal_format: int = gl.GL_RGBA8) -> int:
+def gl_texture_create(w: int, h: int, internal_format: int = _GL_RGBA8) -> int:
     """Create a texture.
 
     Parameters
@@ -487,14 +512,30 @@ def gl_texture_create(w: int, h: int, internal_format: int = gl.GL_RGBA8) -> int
     int
         texture ID
 
+    Raises
+    ------
+    ValueError
+        If `internal_format` is not in `_PIXEL_FORMAT_MAP`.
+
     Notes
     -----
-    * Incoming pixel format is always expected to be GL_RGBA
-    * Incoming pixel type is determined from the preferred format:
-      GL_FLOAT for float types and GL_UNSIGNED BYTE for unsigned byte types.
+    * Incoming pixel format and type are looked up in `_PIXEL_FORMAT_MAP`.
+      No data is uploaded, they only need to be valid for `internal_format`.
+    * The previous texture binding is restored.
     * Internal floating point formats may not be supported on some mobile
       or legacy platforms.
     """
+    # lookup incoming format values in mapping; fail with error if unknown
+    incoming_format, incoming_pixel_type, label = _PIXEL_FORMAT_MAP.get(
+        internal_format, (0, 0, "")
+    )
+    if label == "":
+        raise ValueError(f"Unknown incoming format {hex(internal_format)}")
+
+    logging.debug(f"Allocating GL texture with format {label}")
+
+    saved_texture = _gl_get_int(int(gl.GL_TEXTURE_BINDING_2D))
+
     # Generate texture
     tex = ctypes.c_uint(0)
     gl.glGenTextures(1, ctypes.byref(tex))
@@ -506,15 +547,6 @@ def gl_texture_create(w: int, h: int, internal_format: int = gl.GL_RGBA8) -> int
     gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_LINEAR)
     gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_S, gl.GL_CLAMP_TO_EDGE)
     gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_T, gl.GL_CLAMP_TO_EDGE)
-
-    # lookup incoming format values in mapping; fail with error if unknown
-    incoming_format, incoming_pixel_type, label = _PIXEL_FORMAT_MAP.get(
-        internal_format, (0, 0, "")
-    )
-    if label == "":
-        raise ValueError(f"Unknown incoming format {hex(internal_format)}")
-
-    logging.debug(f"Allocating GL texture with format {label}")
 
     # Allocate storage
     gl.glTexImage2D(
@@ -529,8 +561,8 @@ def gl_texture_create(w: int, h: int, internal_format: int = gl.GL_RGBA8) -> int
         None,
     )
 
-    # Unbind
-    gl.glBindTexture(gl.GL_TEXTURE_2D, 0)
+    # Restore previous binding
+    gl.glBindTexture(gl.GL_TEXTURE_2D, saved_texture)
 
     return tex_id
 
@@ -560,7 +592,20 @@ def gl_fbo_create(tex_id: int) -> int:
     -------
     int
         FBO ID
+
+    Raises
+    ------
+    RuntimeError
+        If the FBO is incomplete. The FBO is deleted in that case.
+
+    Notes
+    -----
+    The previous read and draw framebuffer bindings are restored, so this is
+    safe to call in PsychoPy's context, also with `useFBO=True`.
     """
+    saved_read_fbo = _gl_get_int(int(gl.GL_READ_FRAMEBUFFER_BINDING))
+    saved_draw_fbo = _gl_get_int(int(gl.GL_DRAW_FRAMEBUFFER_BINDING))
+
     # Generate FBO
     fbo = ctypes.c_uint(0)
     gl.glGenFramebuffers(1, ctypes.byref(fbo))
@@ -574,11 +619,14 @@ def gl_fbo_create(tex_id: int) -> int:
 
     # Check status
     status = gl.glCheckFramebufferStatus(gl.GL_FRAMEBUFFER)
-    if status != gl.GL_FRAMEBUFFER_COMPLETE:
-        logging.error(f"Intermediate FBO incomplete (status={status}")
 
-    # Unbind
-    gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, 0)
+    # Restore previous bindings
+    gl.glBindFramebuffer(gl.GL_READ_FRAMEBUFFER, saved_read_fbo)
+    gl.glBindFramebuffer(gl.GL_DRAW_FRAMEBUFFER, saved_draw_fbo)
+
+    if status != gl.GL_FRAMEBUFFER_COMPLETE:
+        gl_fbo_destroy(fbo_id)
+        raise RuntimeError(f"Intermediate FBO incomplete (status={hex(status)})")
 
     return fbo_id
 
@@ -626,18 +674,15 @@ def gl_blit_with_draw_rect(
     Notes
     -----
     PsychoPy's strategy is to set the draw target FBO once and then draw all
-    screen elements to it without setting the FBO again. Here, we initially
-    set both read and draw FBOs to be safe that the correct ones are active,
-    since libMPV may have changed them, but only save and restore the state
-    of the read FBO. Our target FBO is the same as the one Psychopy uses,
-    so it can be left as is.
+    screen elements to it without setting the FBO again. Here, both read and
+    draw FBOs are bound explicitly, so the blit doesn't depend on whatever is
+    currently bound, but only the read FBO is saved and restored. Our draw
+    target is the same as the one PsychoPy uses, so it can be left bound.
     """
 
-    # Save previously bound FBOs
-    previous_read_FBO = ctypes.c_int()
-    gl.glGetIntegerv(gl.GL_READ_FRAMEBUFFER_BINDING, ctypes.byref(previous_read_FBO))
-    # previous_read_FBO = gl.glGetInteger(gl.GL_READ_FRAMEBUFFER_BINDING)
-    # previous_draw_FBO = gl.glGetInteger(gl.GL_DRAW_FRAMEBUFFER_BINDING)
+    # Save previously bound read FBO
+    previous_read_fbo = _gl_get_int(int(gl.GL_READ_FRAMEBUFFER_BINDING))
+    previous_draw_fbo = _gl_get_int(int(gl.GL_DRAW_FRAMEBUFFER_BINDING))
 
     # Bind FBOs
     gl.glBindFramebuffer(gl.GL_READ_FRAMEBUFFER, src_fbo)
@@ -669,10 +714,10 @@ def gl_blit_with_draw_rect(
         gl.GL_NEAREST,  # no resize necessary
     )
 
-    # Restore FBOs
-    gl.glBindFramebuffer(gl.GL_READ_FRAMEBUFFER, previous_read_FBO.value)
+    # Restore read FBO
+    gl.glBindFramebuffer(gl.GL_READ_FRAMEBUFFER, previous_read_fbo)
     # Restoring the draw FBO is unnecessary as we use the same target as PsychoPy
-    # gl.glBindFramebuffer(gl.GL_DRAW_FRAMEBUFFER, previous_draw_FBO.value)
+    gl.glBindFramebuffer(gl.GL_DRAW_FRAMEBUFFER, previous_draw_fbo)
 
 
 def create_shadow_window(main_window: BaseWindow) -> BaseWindow:
@@ -691,25 +736,39 @@ def create_shadow_window(main_window: BaseWindow) -> BaseWindow:
 
     Notes
     -----
-    `create_context()` with shared context doesn't work with pyglet 1.4/1.5,
-    so we create a hidden window instead, and rely on pyglet's internal context
-    sharing behavior.
+    * `create_context()` with shared context doesn't work with pyglet 1.4/1.5,
+      so we create a hidden window instead, and rely on pyglet's internal context
+      sharing behavior: the new context shares with `gl.current_context`.
+      Hence `main_window`'s context is made current first.
+    * `main_window`'s config is reused, as some platforms (macOS in particular)
+      need compatible pixel formats for sharing. If that fails, pyglet's default
+      config is used.
+    * On Linux, call `linux_init_xlib_threads()` before any window is created
+      if the shadow context is used from another thread.
     """
+    # pyglet shares the new context with whichever context is current
+    main_window.switch_to()
 
-    shadow_window = pyglet.window.Window(width=100, height=100, visible=False)
+    try:
+        shadow_window = pyglet.window.Window(
+            width=100, height=100, visible=False, config=main_window.config
+        )
+    except Exception as e:  # pylint: disable=W0718  # noqa: BLE001
+        logging.warning(
+            f"Creating shadow window with the main window's config failed ({e}), "
+            "retrying with the default config"
+        )
+        main_window.switch_to()
+        shadow_window = pyglet.window.Window(width=100, height=100, visible=False)
 
     # keep shadow window out of pyglet's global event/idle loop
     # to prevent crashing on window move
     pyglet.app.windows.remove(shadow_window)
 
-    # shadow_window.switch_to()  # redundant, already in Window.__init__()
-
     # Restore the main window's context as current on this thread (shadow
-    # window's __init__ made its own context current).
+    # window's __init__ made its own context current). switch_to() also sets
+    # gl.current_context.
     main_window.switch_to()
-    # main_window.activate()
-
-    # gl.current_context = main_window.context  # already set by switch_to()
 
     return shadow_window
 
@@ -725,7 +784,7 @@ def create_shadow_window(main_window: BaseWindow) -> BaseWindow:
     # )
 
 
-def make_gl_context_current(window: Any) -> None:
+def make_gl_context_current(window: BaseWindow) -> None:
     """Make *window*'s OpenGL context current on the calling thread.
 
     Alias of ``window.switch_to()``.
@@ -734,6 +793,15 @@ def make_gl_context_current(window: Any) -> None:
     ----------
     window : pyglet.window.BaseWindow
         Window whose context should become current.
+
+    Notes
+    -----
+    pyglet's `gl.current_context` is a single value for the whole process, not
+    per thread ("XXX not per-thread" in pyglet). Calling this from a worker
+    thread therefore also changes the main thread's pyglet bookkeeping. This is
+    harmless as long as nothing on the worker thread relies on pyglet-level
+    state tied to the current context (e.g. pyglet's GL error checks with
+    `debug_gl=True`, which PsychoPy turns off).
     """
     window.switch_to()
 
@@ -741,45 +809,116 @@ def make_gl_context_current(window: Any) -> None:
 def release_gl_context() -> None:
     """Release the current OpenGL context on the calling thread.
 
-    Calls the appropriate platform-specific unbind function.  Safe to call
-    even if no context is current (errors are swallowed).
+    Calls the appropriate platform-specific unbind function. Safe to call
+    even if no context is current (errors are logged, not raised).
+
+    Notes
+    -----
+    * On Windows, a context still current in another thread can't be deleted,
+      so a worker thread must release the shadow context before the shadow
+      window is closed on the main thread.
+    * pyglet's `Context.detach()` isn't used: on Windows it deletes the context.
+    * `gl.current_context` is left untouched, as it's process-wide (see
+      `make_gl_context_current()`).
     """
     platform = pyglet.compat_platform
-    if platform in ("win32", "cygwin"):
+    try:
+        if platform in ("win32", "cygwin"):
+            wgl = importlib.import_module("pyglet.gl.wgl")
+            if not wgl.wglMakeCurrent(None, None):
+                logging.warning("wglMakeCurrent failed to release OpenGL context")
+        elif platform.startswith("linux"):
+            glx = importlib.import_module("pyglet.gl.glx")
+            # display of this thread's current context, NULL if none is current
+            x_display = glx.glXGetCurrentDisplay()
+            if x_display:
+                glx.glXMakeCurrent(x_display, 0, None)
+        elif platform == "darwin":
+            cocoapy = importlib.import_module("pyglet.libs.darwin.cocoapy")
+            cocoapy.ObjCClass("NSOpenGLContext").clearCurrentContext()
+    except Exception as e:  # pylint: disable=broad-except  # noqa: BLE001
+        logging.error(f"Error when releasing OpenGL context on {platform}: {e}")
+
+
+def linux_init_xlib_threads() -> None:
+    """Initialize Xlib for multithreaded use on Linux (`XInitThreads()`).
+
+    pyglet never calls `XInitThreads()`, but making the shadow context current
+    in a worker thread uses the same X display connection as the main thread.
+    Without this call, Xlib isn't thread-safe and may crash at random.
+
+    Notes
+    -----
+    Must be called before PsychoPy or pyglet open the X display, i.e. before any
+    window is created. Does nothing on other platforms.
+    """
+    if not pyglet.compat_platform.startswith("linux"):
+        return
+    try:
+        libx11 = ctypes.CDLL(ctypes.util.find_library("X11") or "libX11.so.6")
+        if not libx11.XInitThreads():
+            logging.error("XInitThreads failed")
+    except OSError as e:
+        logging.error(f"Error when initializing Xlib threads: {e}")
+
+
+def windows_get_screen_dpi(window: BaseWindow | None = None) -> tuple[int, int] | None:
+    """Get the screen DPI on Windows.
+
+    Parameters
+    ----------
+    window : pyglet.window.BaseWindow, optional
+        If given, return the DPI of the monitor this window is on (e.g. pass
+        PsychoPy's ``win.winHandle``). Otherwise, return the system (primary
+        monitor) DPI.
+
+    Returns
+    -------
+    tuple[int, int] or None
+        Horizontal and vertical DPI, or None on other platforms or on error.
+
+    Notes
+    -----
+    If the process isn't DPI-aware, Windows virtualizes the DPI and this always
+    returns 96 (see `windows_set_process_dpi_awareness()`).
+    """
+    if pyglet.compat_platform != "win32":
+        return None
+    try:
+        # private library instances, so setting argtypes doesn't affect ctypes.windll
+        user32 = ctypes.WinDLL("user32")
+        hwnd = getattr(window, "_hwnd", None) if window is not None else None
+        if hwnd:
+            # Windows 10 1607+
+            user32.GetDpiForWindow.argtypes = [ctypes.c_void_p]
+            user32.GetDpiForWindow.restype = ctypes.c_uint
+            dpi = user32.GetDpiForWindow(hwnd)
+            if dpi:
+                return dpi, dpi
+            logging.warning("GetDpiForWindow failed, returning system DPI")
+
+        gdi32 = ctypes.WinDLL("gdi32")
+        user32.GetDC.argtypes = [ctypes.c_void_p]
+        user32.GetDC.restype = ctypes.c_void_p
+        user32.ReleaseDC.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        gdi32.GetDeviceCaps.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        hdc = user32.GetDC(None)
         try:
-            wgl_lib = importlib.import_module("pyglet.gl.lib_wgl")
-
-            wgl_lib.wglMakeCurrent(None, None)  # ty: ignore[unresolved-attribute]
-        except Exception as e:  # pylint: disable=broad-except  # noqa: BLE001
-            logging.error(f"Error when releasing OpenGL context on {platform}: {e}")
-    elif platform.startswith("linux"):
-        try:
-            glx_lib = importlib.import_module("pyglet.gl.lib_glx")
-
-            ctx = pyglet.gl.current_context
-            if ctx is not None:
-                glx_lib.glXMakeCurrent(ctx._display, 0, None)  # pylint: disable=protected-access
-        except Exception as e:  # pylint: disable=broad-except  # noqa: BLE001
-            logging.error(f"Error when releasing OpenGL context on {platform}: {e}")
-    # macOS: NSOpenGLContext.clearCurrentContext() — not required for our use-case
-
-
-def windows_get_screen_dpi() -> tuple[int, int] | None:
-    """Get active screen's DPI on Windows."""
-    if pyglet.compat_platform == "win32":
-        # get active screen's dpi
-        try:
-            hdc = ctypes.windll.user32.GetDC(0)
-            dpi_x = ctypes.windll.gdi32.GetDeviceCaps(hdc, 88)  # LOGPIXELSX
-            dpi_y = ctypes.windll.gdi32.GetDeviceCaps(hdc, 90)  # LOGPIXELSY
-            return dpi_x, dpi_y
-        except Exception as e:  # pylint: disable=W0718  # noqa: BLE001
-            logging.error(f"Error when getting active screen DPI: {e}")
+            dpi_x = gdi32.GetDeviceCaps(hdc, 88)  # LOGPIXELSX
+            dpi_y = gdi32.GetDeviceCaps(hdc, 90)  # LOGPIXELSY
+        finally:
+            user32.ReleaseDC(None, hdc)
+        return dpi_x, dpi_y
+    except Exception as e:  # pylint: disable=W0718  # noqa: BLE001
+        logging.error(f"Error when getting screen DPI: {e}")
     return None
 
 
-def windows_set_process_dpi_awareness(level: bool | int = True):
+def windows_set_process_dpi_awareness(level: bool | int = True) -> None:
     """Set Windows process DPI awareness level.
+
+    Must be called before any window is created. Fails if the awareness was
+    already set, e.g. by the application manifest or an earlier call.
 
     Parameters
     ----------
@@ -794,13 +933,24 @@ def windows_set_process_dpi_awareness(level: bool | int = True):
     """
     if pyglet.compat_platform != "win32":
         logging.error("Error: this function is only supported on Windows.")
+        return
     if isinstance(level, bool):
         level = -2 if level else -1
     elif not isinstance(level, int):
         raise TypeError("level must be a bool or int")
     try:
-        ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_int64(level))
-        logging.info(f"Windows process DPI awareness context set to {level}")
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        # DPI_AWARENESS_CONTEXT is a pointer-sized handle
+        user32.SetProcessDpiAwarenessContext.argtypes = [ctypes.c_ssize_t]
+        user32.SetProcessDpiAwarenessContext.restype = ctypes.c_int
+        if user32.SetProcessDpiAwarenessContext(level):
+            logging.info(f"Windows process DPI awareness context set to {level}")
+        else:
+            err = ctypes.get_last_error()
+            logging.error(
+                f"Setting process DPI awareness context to {level} failed: "
+                f"{ctypes.FormatError(err)} ({err})"
+            )
     except Exception as e:  # pylint: disable=W0718  #  noqa: BLE001
         logging.error(f"Error when setting process DPI awareness context: {e}")
 
@@ -822,17 +972,29 @@ def find_parent_properties(
     dict[str, Callable[[T, Any], None]]
         A dictionary mapping property names to their corresponding property
         object setters (e.g. size.setter(self, value)) found in parent classes.
-        Properties without setters are ignored.
+
+    Notes
+    -----
+    Like normal attribute lookup, the search stops at the nearest parent that
+    defines the name. If that definition has no setter, the name is left out
+    (with a warning), rather than returning a deeper parent's setter, which
+    would bypass the override.
     """
     parent_prop_setters: dict[str, Callable[[T, Any], None]] = {}
-    mro = cls.__mro__
-    start_index = mro.index(cls)
     for propname in prop_names:
-        for parent_cls in mro[start_index + 1 :]:
+        for parent_cls in cls.__mro__[1:]:
             prop = vars(parent_cls).get(propname)
-            if prop is not None and getattr(prop, "fset", None) is not None:
-                parent_prop_setters[propname] = prop.fset
-                break  # Stop searching after finding the first setter
+            if prop is None:
+                continue
+            fset = getattr(prop, "fset", None)
+            if fset is not None:
+                parent_prop_setters[propname] = fset
+            else:
+                logging.warning(
+                    f"'{propname}' in '{parent_cls.__name__}' (parent class of "
+                    f"'{cls.__name__}') has no property setter"
+                )
+            break  # Stop at the nearest definition
         else:
             logging.warning(
                 f"Property '{propname}' setter not found in parent classes"
