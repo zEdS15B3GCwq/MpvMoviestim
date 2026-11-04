@@ -3,7 +3,8 @@ from __future__ import annotations
 
 import ctypes
 import importlib
-from typing import TYPE_CHECKING, TypeVar
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Literal, TypeAlias, TypeVar
 
 import pyglet
 import pyglet.window
@@ -21,44 +22,211 @@ if TYPE_CHECKING:
 
 T = TypeVar("T")
 
+# OpenGL sized internal formats, with fallback values for pyglet versions lacking them
+_GL_RGB8 = int(getattr(gl, "GL_RGB8", 0x8051))
+_GL_RGBA8 = int(getattr(gl, "GL_RGBA8", 0x8058))
+_GL_RGB10 = int(getattr(gl, "GL_RGB10", 0x8052))
+_GL_RGB10_A2 = int(getattr(gl, "GL_RGB10_A2", 0x8059))
+_GL_RGB16 = int(getattr(gl, "GL_RGB16", 0x8054))
+_GL_RGBA16 = int(getattr(gl, "GL_RGBA16", 0x805B))
+_GL_RGB16F = int(getattr(gl, "GL_RGB16F", 0x881B))
+_GL_RGBA16F = int(getattr(gl, "GL_RGBA16F", 0x881A))
+_GL_RGB32F = int(getattr(gl, "GL_RGB32F", 0x8815))
+_GL_RGBA32F = int(getattr(gl, "GL_RGBA32F", 0x8814))
+
+# ARB_color_buffer_float, available in compatibility and legacy contexts
+_GL_RGBA_FLOAT_MODE_ARB = 0x8820
+
+# Pixel format -> (incoming format, incoming pixel type, name) for texture allocation
 _PIXEL_FORMAT_MAP: dict[int, tuple[int, int, str]] = {
-    int(getattr(gl, "GL_RGBA32F", 0x8814)): (gl.GL_RGBA, gl.GL_FLOAT, "RGBA32F"),
-    int(getattr(gl, "GL_RGB32F", 0x8815)): (gl.GL_RGB, gl.GL_FLOAT, "RGB32F"),
-    int(getattr(gl, "GL_RGBA16F", 0x881A)): (gl.GL_RGBA, gl.GL_HALF_FLOAT, "RGBA16F"),
-    int(getattr(gl, "GL_RGB16F", 0x881B)): (gl.GL_RGB, gl.GL_HALF_FLOAT, "RGB16F"),
-    int(getattr(gl, "GL_RGBA8", 0x8058)): (gl.GL_RGBA, gl.GL_UNSIGNED_BYTE, "RGBA8"),
-    int(getattr(gl, "GL_RGB8", 0x8051)): (gl.GL_RGB, gl.GL_UNSIGNED_BYTE, "RGB8"),
-    int(getattr(gl, "GL_RGB10_A2", 0x8059)): (
-        gl.GL_RGBA,
-        gl.GL_UNSIGNED_INT_2_10_10_10_REV,
-        "RGB10_A2",
-    ),
-    int(getattr(gl, "GL_RGB10", 0x8052)): (
-        gl.GL_RGB,
-        gl.GL_UNSIGNED_INT_10_10_10_2,
-        "RGB10",
-    ),
-    int(getattr(gl, "GL_RGBA16", 0x805B)): (gl.GL_RGBA, gl.GL_UNSIGNED_SHORT, "RGBA16"),
-    int(getattr(gl, "GL_RGB16", 0x8054)): (gl.GL_RGB, gl.GL_UNSIGNED_SHORT, "RGB16"),
+    _GL_RGBA32F: (gl.GL_RGBA, gl.GL_FLOAT, "RGBA32F"),
+    _GL_RGB32F: (gl.GL_RGB, gl.GL_FLOAT, "RGB32F"),
+    _GL_RGBA16F: (gl.GL_RGBA, gl.GL_HALF_FLOAT, "RGBA16F"),
+    _GL_RGB16F: (gl.GL_RGB, gl.GL_HALF_FLOAT, "RGB16F"),
+    _GL_RGBA8: (gl.GL_RGBA, gl.GL_UNSIGNED_BYTE, "RGBA8"),
+    _GL_RGB8: (gl.GL_RGB, gl.GL_UNSIGNED_BYTE, "RGB8"),
+    _GL_RGB10_A2: (gl.GL_RGBA, gl.GL_UNSIGNED_INT_2_10_10_10_REV, "RGB10_A2"),
+    # GL_UNSIGNED_INT_10_10_10_2 is a 4-component packed type, invalid with GL_RGB
+    _GL_RGB10: (gl.GL_RGBA, gl.GL_UNSIGNED_INT_2_10_10_10_REV, "RGB10"),
+    _GL_RGBA16: (gl.GL_RGBA, gl.GL_UNSIGNED_SHORT, "RGBA16"),
+    _GL_RGB16: (gl.GL_RGB, gl.GL_UNSIGNED_SHORT, "RGB16"),
 }
 
+# Screen backbuffer bit counts (red, green, blue, alpha, is_float) -> pixel format
+_BITS_TO_PIXEL_FORMAT: dict[tuple[int, int, int, int, bool], int] = {
+    (8, 8, 8, 8, False): _GL_RGBA8,
+    (8, 8, 8, 0, False): _GL_RGB8,
+    (10, 10, 10, 2, False): _GL_RGB10_A2,
+    (10, 10, 10, 0, False): _GL_RGB10,
+    (16, 16, 16, 16, False): _GL_RGBA16,
+    (16, 16, 16, 0, False): _GL_RGB16,
+    (16, 16, 16, 16, True): _GL_RGBA16F,
+    (16, 16, 16, 0, True): _GL_RGB16F,
+    (32, 32, 32, 32, True): _GL_RGBA32F,
+    (32, 32, 32, 0, True): _GL_RGB32F,
+}
 
-def _bpc_to_pixel_format(red: int, green: int, blue: int, alpha: int) -> int:  # noqa: PLR0911
-    match (red, green, blue, alpha):
-        case (8, 8, 8, 8):
-            return int(getattr(gl, "GL_RGBA8", 0x8058))
-        case (8, 8, 8, 0):
-            return int(getattr(gl, "GL_RGB8", 0x8051))
-        case (10, 10, 10, 2):
-            return int(getattr(gl, "GL_RGB10_A2", 0x8059))
-        case (10, 10, 10, 0):
-            return int(getattr(gl, "GL_RGB10", 0x8052))
-        case (16, 16, 16, 16):
-            return int(getattr(gl, "GL_RGBA16", 0x805B))
-        case (16, 16, 16, 0):
-            return int(getattr(gl, "GL_RGB16", 0x8054))
-        case _:
-            return 0
+# Blit target pixel format -> intermediate buffer pixel format
+# * RGB formats become RGBA: RGB16F/RGB32F aren't required to be color-renderable,
+#   so FBOs using them may be incomplete on some drivers.
+# * 32-bit floats become RGBA16F: ~11 bits of precision near 1.0 is enough for
+#   video, at half the memory and bandwidth.
+_INTERMEDIATE_FORMAT_MAP: dict[int, int] = {
+    _GL_RGB8: _GL_RGBA8,
+    _GL_RGBA8: _GL_RGBA8,
+    _GL_RGB10: _GL_RGB10_A2,
+    _GL_RGB10_A2: _GL_RGB10_A2,
+    _GL_RGB16: _GL_RGBA16,
+    _GL_RGBA16: _GL_RGBA16,
+    _GL_RGB16F: _GL_RGBA16F,
+    _GL_RGBA16F: _GL_RGBA16F,
+    _GL_RGB32F: _GL_RGBA16F,
+    _GL_RGBA32F: _GL_RGBA16F,
+}
+
+DitherDepth: TypeAlias = int | Literal["no"]
+"""Value of mpv's `dither-depth` option: bits per component, or "no"."""
+
+# Screen backbuffer pixel format -> mpv dither depth. Dithering is needed when the
+# output is quantized to 8 or 10 bits, 16-bit and float outputs need none.
+_DITHER_DEPTH_MAP: dict[int, DitherDepth] = {
+    _GL_RGB8: 8,
+    _GL_RGBA8: 8,
+    _GL_RGB10: 10,
+    _GL_RGB10_A2: 10,
+    _GL_RGB16: "no",
+    _GL_RGBA16: "no",
+    _GL_RGB16F: "no",
+    _GL_RGBA16F: "no",
+    _GL_RGB32F: "no",
+    _GL_RGBA32F: "no",
+}
+
+# Used when a pixel format can't be determined
+_DEFAULT_INTERMEDIATE_FORMAT = _GL_RGBA8
+_DEFAULT_DITHER_DEPTH: DitherDepth = 8
+
+
+@dataclass(frozen=True, slots=True)
+class PsychoPyRenderingEnvironment:
+    """PsychoPy's rendering environment: its draw target and the screen backbuffer.
+
+    PsychoPy draws into the screen backbuffer directly, or into an FBO if
+    `useFBO=True`, which is then drawn to the screen backbuffer on flip.
+
+    Attributes
+    ----------
+    use_fbo : bool
+        True if PsychoPy draws into an FBO (`useFBO=True`).
+    target_fbo : int
+        PsychoPy's draw target FBO, or 0 when it's the screen backbuffer.
+    w, h : int
+        Size of PsychoPy's draw target in pixels.
+    target_format : int
+        Pixel format of PsychoPy's FBO. 0 when the target is the screen
+        backbuffer (see `screen_format`), or if it can't be determined.
+    samples : int
+        Number of samples of PsychoPy's draw target, 0 if not multisampled.
+        Blitting into a multisampled target is not possible (GL_INVALID_OPERATION).
+    screen_bits : tuple[int, int, int, int]
+        Red, green, blue and alpha bit counts of the screen backbuffer.
+    screen_is_float : bool
+        True if the screen backbuffer has floating point components.
+    screen_format : int
+        Pixel format of the screen backbuffer, 0 if it can't be determined.
+    """
+
+    use_fbo: bool
+    target_fbo: int
+    w: int
+    h: int
+    target_format: int
+    samples: int
+    screen_bits: tuple[int, int, int, int]
+    screen_is_float: bool
+    screen_format: int
+
+
+def _gl_get_int(pname: int) -> int:
+    """Return the value of a named GL integer."""
+    out = ctypes.c_int(0)
+    gl.glGetIntegerv(pname, out)
+    return out.value
+
+
+def _gl_try_get_bool(pname: int) -> bool | None:
+    """Return the value of a named GL boolean, or None if it isn't supported."""
+    # clear stale errors, so the check below only sees ours
+    for _ in range(16):
+        if gl.glGetError() == gl.GL_NO_ERROR:
+            break
+
+    value = gl.GLboolean(0)
+    try:
+        gl.glGetBooleanv(pname, ctypes.byref(value))
+    except gl.GLException:  # raised instead of setting the error when debug_gl is on
+        return None
+    if gl.glGetError() != gl.GL_NO_ERROR:
+        return None
+    return bool(value.value)
+
+
+def _gl_name(obj: Any) -> int:
+    """Return a GL object name stored either as int or as ctypes value (e.g. c_uint)."""
+    return int(getattr(obj, "value", obj))
+
+
+def _get_backbuffer_bits() -> tuple[int, int, int, int, bool]:
+    """Return the backbuffer's RGBA bit counts and whether it's floating point.
+
+    Notes
+    -----
+    * The window's OpenGL context must be current.
+    * GL_*_BITS and GL_RGBA_FLOAT_MODE_ARB are legacy queries. They work in the
+      compatibility and legacy contexts that pyglet 1.4/1.5 create, but not in
+      core profiles.
+    """
+    # the queries describe the bound draw framebuffer, make sure it's the backbuffer
+    saved_draw_fbo = _gl_get_int(int(gl.GL_DRAW_FRAMEBUFFER_BINDING))
+    gl.glBindFramebuffer(gl.GL_DRAW_FRAMEBUFFER, 0)
+
+    red = _gl_get_int(int(gl.GL_RED_BITS))
+    green = _gl_get_int(int(gl.GL_GREEN_BITS))
+    blue = _gl_get_int(int(gl.GL_BLUE_BITS))
+    alpha = _gl_get_int(int(gl.GL_ALPHA_BITS))
+    # bit counts can't distinguish e.g. RGBA16 from RGBA16F
+    is_float = bool(_gl_try_get_bool(_GL_RGBA_FLOAT_MODE_ARB))
+
+    gl.glBindFramebuffer(gl.GL_DRAW_FRAMEBUFFER, saved_draw_fbo)
+    return red, green, blue, alpha, is_float
+
+
+def _get_texture_format(tex_id: int) -> int:
+    """Return the internal pixel format of a 2D texture."""
+    saved_texture = _gl_get_int(int(gl.GL_TEXTURE_BINDING_2D))
+    gl.glBindTexture(gl.GL_TEXTURE_2D, tex_id)
+
+    value = ctypes.c_int(0)
+    gl.glGetTexLevelParameteriv(
+        gl.GL_TEXTURE_2D, 0, int(gl.GL_TEXTURE_INTERNAL_FORMAT), value
+    )
+
+    gl.glBindTexture(gl.GL_TEXTURE_2D, saved_texture)
+    return value.value
+
+
+def _get_framebuffer_samples(fbo: int) -> int:
+    """Return the number of samples of a framebuffer, or 0 if it isn't multisampled."""
+    saved_draw_fbo = _gl_get_int(int(gl.GL_DRAW_FRAMEBUFFER_BINDING))
+    gl.glBindFramebuffer(gl.GL_DRAW_FRAMEBUFFER, fbo)
+
+    # GL_SAMPLE_BUFFERS and GL_SAMPLES describe the bound draw framebuffer
+    samples = 0
+    if _gl_get_int(int(gl.GL_SAMPLE_BUFFERS)) > 0:
+        samples = max(_gl_get_int(int(gl.GL_SAMPLES)), 1)
+
+    gl.glBindFramebuffer(gl.GL_DRAW_FRAMEBUFFER, saved_draw_fbo)
+    return samples
 
 
 def pixel_format_id_to_name(format_id: int) -> str:
@@ -66,113 +234,127 @@ def pixel_format_id_to_name(format_id: int) -> str:
     return f[2] if f is not None else ""
 
 
-def get_psychopy_fbo_info(
+def get_psychopy_rendering_environment(
     win: visual.Window,
-) -> dict[str, int]:
-    """Return FBO information for a PsychoPy/Pyglet window.
-
-    Psychopy's window may use the backbuffer directly, or an intermediate FBO
-    (if `useFBO=True`). This function determines the FBO's id, width, height,
-    and its internal pixel format if possible.
+) -> PsychoPyRenderingEnvironment:
+    """Return PsychoPy's rendering environment: its draw target and the screen.
 
     Parameters
     ----------
-    win: psychopy.visual.Window
+    win : psychopy.visual.Window
         Psychopy's window (pyglet-based).
 
     Returns
     -------
-    dict[str, Any] (with elements corresponding to mpv.MpvOpenGLFBO)
-        fbo: int
-            Psychopy's render FBO, or 0 when the window backbuffer is the target.
-        w: int
-            Width of the target buffer
-        h: int
-            Height of the target buffer
-        internal_format: int
-            OpenGL number of the best matching format.
-            This field is only present if a best format can be determined.
+    PsychoPyRenderingEnvironment
 
     Notes
     -----
-    * The OpenGL context of the provided window must be current, so this
-      function activates the window before querying it.
-    * Typically, PsychoPy's intermediate FBO has the RGBA32F pixel format,
-      while the screen backbuffer has something like RGB8.
-    * In some cases, atypical internal formats may not be correctly detected,
-      in which case the returned info may omit the `internal_format` field.
+    * The window's OpenGL context is made current before querying it.
+    * Typically, PsychoPy's FBO has the RGBA32F pixel format, while the screen
+      backbuffer has something like RGB8.
+    * Use `recommend_intermediate_pixel_format()` and `recommend_dithering_depth()`
+      to derive settings from the result.
     """
-
-    def _get_gl_int(pname: int) -> int:
-        """Return the value of a named GL integer."""
-        out = ctypes.c_int(0)
-        gl.glGetIntegerv(pname, out)
-        return out.value
-
-    # Activate main window's OpenGL context
     assert win.winHandle is not None
-    pyglet_window: BaseWindow = win.winHandle
-    pyglet_window.switch_to()
-    pyglet_window.activate()
-    # TODO: switch_to may be enough, test if activating is necessary
+    make_gl_context_current(win.winHandle)
 
+    # screen backbuffer: get pixel bit counts, convert to pixel format
+    red, green, blue, alpha, screen_is_float = _get_backbuffer_bits()
+    screen_format = _BITS_TO_PIXEL_FORMAT.get(
+        (red, green, blue, alpha, screen_is_float), 0
+    )
+
+    # bpc = getattr(win, "bpc", None)
+    # if bpc is not None:
+    #     print(f"Psychopy window reports {bpc} bits per channel (win.bpc).")
+
+    # PsychoPy's draw target: the screen backbuffer, or an FBO if useFBO=True
+    w, h = win.frameBufferSize
     if win.useFBO:
-        tex_id: int = win.frameTexture
-
-        # bind the window's texture
-        saved_texture = _get_gl_int(int(gl.GL_TEXTURE_BINDING_2D))
-        gl.glBindTexture(gl.GL_TEXTURE_2D, tex_id)
-
-        internal_format_value = ctypes.c_int(0)
-        gl.glGetTexLevelParameteriv(
-            gl.GL_TEXTURE_2D,
-            0,
-            int(gl.GL_TEXTURE_INTERNAL_FORMAT),
-            internal_format_value,
-        )
-
-        # restore the previous texture binding
-        gl.glBindTexture(gl.GL_TEXTURE_2D, saved_texture)
-
-        internal_fmt = internal_format_value.value
-        target_fbo: int = win.frameBuffer.value
-
+        target_fbo = _gl_name(win.frameBuffer)
+        target_format = _get_texture_format(_gl_name(win.frameTexture))
     else:
         target_fbo = 0
+        target_format = 0
 
-        red_bits = _get_gl_int(int(gl.GL_RED_BITS))
-        green_bits = _get_gl_int(int(gl.GL_GREEN_BITS))
-        blue_bits = _get_gl_int(int(gl.GL_BLUE_BITS))
-        alpha_bits = _get_gl_int(int(gl.GL_ALPHA_BITS))
+    # multisampling of the draw target
+    samples = _get_framebuffer_samples(target_fbo)
 
-        # bpc = getattr(win, "bpc", None)
-        # if bpc is not None:
-        #     print(f"Psychopy window reports {bpc} bits per channel (win.bpc).")
-
-        internal_fmt = _bpc_to_pixel_format(red_bits, green_bits, blue_bits, alpha_bits)
-
-    w, h = win.frameBufferSize
-    fbo_info: dict[str, int] = {
-        "w": w,
-        "h": h,
-        "fbo": target_fbo,
-    }
-    if internal_fmt != 0:
-        fbo_info["internal_format"] = internal_fmt
+    env = PsychoPyRenderingEnvironment(
+        use_fbo=bool(win.useFBO),
+        target_fbo=target_fbo,
+        w=w,
+        h=h,
+        target_format=target_format,
+        samples=samples,
+        screen_bits=(red, green, blue, alpha),
+        screen_is_float=screen_is_float,
+        screen_format=screen_format,
+    )
 
     # log
-    format_name = (
-        "<undetermined>"
-        if "internal_format" not in fbo_info
-        else pixel_format_id_to_name(fbo_info["internal_format"])
+    screen_name = pixel_format_id_to_name(screen_format) or "<undetermined>"
+    target_name = (
+        (pixel_format_id_to_name(target_format) or "<undetermined>")
+        if env.use_fbo
+        else "<screen>"
     )
     logging.info(
-        f"Psychopy's rendering FBO: fbo={fbo_info['fbo']}, "
-        f"size={fbo_info['w']}x{fbo_info['h']}, "
-        f"format={format_name}"
+        f"Psychopy's rendering target: fbo={target_fbo}, size={w}x{h}, "
+        f"format={target_name}, samples={samples}; "
+        f"screen backbuffer: format={screen_name}, "
+        f"bits={red}/{green}/{blue}/{alpha}, float={screen_is_float}"
     )
+    if samples > 0:
+        logging.warning(
+            f"Psychopy's rendering target is multisampled ({samples} samples), "
+            "blitting into it is not possible"
+        )
 
-    return fbo_info
+    return env
+
+
+def recommend_intermediate_pixel_format(env: PsychoPyRenderingEnvironment) -> int:
+    """Return the recommended pixel format of the intermediate buffers.
+
+    The intermediate buffers are blitted to PsychoPy's draw target, so their
+    format matches the precision of that target (see `_INTERMEDIATE_FORMAT_MAP`).
+    Pass the same format to mpv as the FBO's `internal_format`.
+
+    Parameters
+    ----------
+    env : PsychoPyRenderingEnvironment
+        Result of `get_psychopy_rendering_environment()`.
+
+    Returns
+    -------
+    int
+        OpenGL pixel format.
+    """
+    # without an FBO, or if its format is unknown, the screen is the reference
+    blit_format = env.target_format or env.screen_format
+    return _INTERMEDIATE_FORMAT_MAP.get(blit_format, _DEFAULT_INTERMEDIATE_FORMAT)
+
+
+def recommend_dithering_depth(env: PsychoPyRenderingEnvironment) -> DitherDepth:
+    """Return the recommended value of mpv's `dither-depth` option.
+
+    The image is finally quantized in the screen backbuffer, so dithering is
+    matched to its depth (see `_DITHER_DEPTH_MAP`). With a float intermediate
+    buffer, mpv's `dither-depth=auto` wouldn't dither at all.
+
+    Parameters
+    ----------
+    env : PsychoPyRenderingEnvironment
+        Result of `get_psychopy_rendering_environment()`.
+
+    Returns
+    -------
+    DitherDepth
+        Bits per component, or "no".
+    """
+    return _DITHER_DEPTH_MAP.get(env.screen_format, _DEFAULT_DITHER_DEPTH)
 
 
 def _resolve_gl_proc_with_pyglet(name: bytes) -> int:
@@ -210,6 +392,7 @@ def _resolve_gl_proc_with_pyglet(name: bytes) -> int:
     logging.info(
         f"Resolving OpenGL function {name_str} using pyglet backend for platform {platform}"
     )
+    getprocaddress_func_names: list[str] = []
 
     # Windows
     if platform in ("win32", "cygwin"):
@@ -224,7 +407,6 @@ def _resolve_gl_proc_with_pyglet(name: bytes) -> int:
     # macOS
     elif platform == "darwin":
         pyglet_lib_name = "pyglet.gl.lib_agl"
-        getprocaddress_func_names: list[str] = []
 
     else:
         logging.error(
@@ -525,7 +707,7 @@ def create_shadow_window(main_window: BaseWindow) -> BaseWindow:
     # Restore the main window's context as current on this thread (shadow
     # window's __init__ made its own context current).
     main_window.switch_to()
-    main_window.activate()
+    # main_window.activate()
 
     # gl.current_context = main_window.context  # already set by switch_to()
 
