@@ -78,7 +78,16 @@ Below is a table of synchronisation objects used:
 
 | Name | Type | Purpose |
 | --- | --- | --- |
-| buffer_fbo_lock | threading.Lock | |
+| `buffer_fbo_lock` | `threading.Lock` | Protects push-mode buffer indices, `worker_is_rendering`, and `buffer_flip_required` while the worker and draw thread exchange buffers. |
+| `wakeup_worker_trigger` | `threading.Event` | MPV's update callback sets this to wake the push-mode worker; the worker clears it after waking. Shutdown also sets it to wake a waiting worker. |
+| `stop_worker_event` | `threading.Event` | Signals the push-mode worker to exit after it wakes and drains pending MPV updates. |
+| `worker_init_done` | `threading.Event` | Signals that the worker has created its MPV render context, allowing initialization on the main thread to continue. |
+| `worker_render_done` | `threading.Event` | The worker sets this after rendering and publishing a frame; the draw thread waits on it if it finds rendering in progress. |
+| `worker_is_rendering` | `bool` (protected by `buffer_fbo_lock`) | Indicates that the worker is rendering into a buffer, so the draw thread can wait before flipping buffers. |
+| `buffer_flip_required` | `bool` (protected by `buffer_fbo_lock`) | Indicates that a newly rendered buffer is ready for the draw thread to promote to the presentation buffer. |
+| `render_fences` | Per-buffer OpenGL `GLsync` fences | Inserted by the worker after rendering; the draw thread waits on the presentation buffer's fence before blitting from it. |
+| `blit_fences` | Per-buffer OpenGL `GLsync` fences | Inserted by the draw thread after blitting; the worker waits on that buffer's fence before reusing it for rendering. |
+| `worker_thread.join()` | `threading.Thread` join | During shutdown, waits for the push-mode worker to exit and release its render context and intermediate buffers before MPV is quit. |
 
 ### Framebuffer and geometry
 
