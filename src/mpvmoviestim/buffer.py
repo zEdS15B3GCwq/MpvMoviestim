@@ -9,19 +9,19 @@ threads use OpenGL contexts of the same share group.
 * CPU side: a single lock guards which buffer each thread holds, and a
   condition on that lock lets C wait for the frame P is rendering.
 * GPU side: each buffer has one "last use" fence. Whoever takes a buffer makes
-  its GPU queue wait for that fence (`glWaitSync`, the CPU doesn't block), and
-  leaves a new fence when releasing it (`glFenceSync` + `glFlush`).
+  its GPU queue wait for that fence if the other thread placed it
+  (`glWaitSync`, the CPU doesn't block), and leaves a new fence when releasing
+  the buffer (`glFenceSync` + `glFlush`).
 
 Typical use::
 
     # P, with its context current, whenever a new frame arrives
-    with manager.write() as buffer:
-        buffer.ensure_capacity(width, height, pixel_format)
+    with manager.acquire_write_buffer() as buffer:
+        buffer.set_frame_size(width, height, pixel_format)
         render_frame_into(buffer.fbo_id, width, height)
-        buffer.frame_width, buffer.frame_height = width, height
 
     # C, with its context current, once per screen refresh
-    with manager.read(timeout=wait_budget) as frame:
+    with manager.acquire_read_buffer(timeout=wait_budget) as frame:
         if frame is not None:
             draw_texture(frame.buffer.texture_id, frame.buffer.frame_width, ...)
 
@@ -62,15 +62,20 @@ def _insert_fence_and_flush() -> Any:
     return fence
 
 
-def _gpu_wait_for_fence_and_delete(fence: Any) -> None:
-    """Make the current context's GPU queue wait for `fence`, then delete it.
+def _wait_for_fence_and_delete(fence: Any, gpu_wait_needed: bool) -> None:
+    """Make the current context's GPU queue wait for `fence` if needed, then delete it.
 
-    `glWaitSync` returns immediately, only the GPU waits. Deleting the fence
-    right away is safe: GL defers the deletion while a wait on it is pending.
+    `glWaitSync` returns immediately, only the GPU waits. A thread's own fence
+    needs no wait: commands within one context are executed in order, and the
+    wait could still cost GPU time by draining the pipeline. Deleting the fence
+    right after the wait is safe: GL defers the deletion while a wait on it is
+    pending.
     """
-    if fence:  # NULL GLsync pointers are falsy
+    if not fence:  # NULL GLsync pointers are falsy
+        return
+    if gpu_wait_needed:
         gl.glWaitSync(fence, 0, gl.GL_TIMEOUT_IGNORED)
-        gl.glDeleteSync(fence)
+    gl.glDeleteSync(fence)
 
 
 class FrameBuffer:
@@ -88,12 +93,17 @@ class FrameBuffer:
         Internal pixel format of the texture, e.g. GL_RGBA8.
     frame_width, frame_height : int
         Size of the frame stored in the buffer, at most the allocated size.
-        Set by P after rendering; 0 if the buffer holds no frame.
+        The frame always starts at (0, 0) of the texture. Set by P with
+        `set_frame_size()`; 0 if the buffer holds no frame.
     frame_serial : int
-        Number of the published frame stored in the buffer, 0 if none.
+        Number of the published frame stored in the buffer, 0 if the buffer
+        holds no frame that may be shown (empty, or rendering failed).
         Owned by `BufferManager`, only changed under its lock.
     last_use_fence : GLsync or None
         Fence after the last GPU commands that used the buffer.
+        Owned by `BufferManager`.
+    last_use_fence_placed_by_writer : bool
+        True if P placed `last_use_fence`, False if C did.
         Owned by `BufferManager`.
     """
 
@@ -105,6 +115,7 @@ class FrameBuffer:
         "frame_serial",
         "frame_width",
         "last_use_fence",
+        "last_use_fence_placed_by_writer",
         "pixel_format",
         "texture_id",
     )
@@ -119,6 +130,7 @@ class FrameBuffer:
         self.frame_height = 0
         self.frame_serial = 0
         self.last_use_fence: Any = None
+        self.last_use_fence_placed_by_writer = False
 
     def __repr__(self) -> str:
         return (
@@ -132,15 +144,18 @@ class FrameBuffer:
     def is_allocated(self) -> bool:
         return self.texture_id != 0
 
-    def ensure_capacity(self, width: int, height: int, pixel_format: int) -> bool:
-        """Make sure the buffer can hold a `width` x `height` frame of `pixel_format`.
+    def set_frame_size(
+        self, frame_width: int, frame_height: int, pixel_format: int
+    ) -> bool:
+        """Set the size of the frame about to be rendered, reallocating if needed.
 
-        The buffer is reallocated if it's too small or has another pixel
-        format, otherwise it's left as is: smaller frames reuse the buffer.
+        P calls this before rendering each frame. The buffer is reallocated if
+        it's too small or has another pixel format; smaller frames reuse the
+        allocation and occupy its (0, 0, frame_width, frame_height) area.
 
         Parameters
         ----------
-        width, height : int
+        frame_width, frame_height : int
             Frame size in pixels.
         pixel_format : int
             Internal pixel format, e.g. GL_RGBA8.
@@ -148,58 +163,27 @@ class FrameBuffer:
         Returns
         -------
         bool
-            True if the buffer was (re)allocated. Its contents are undefined then.
+            True if the buffer was reallocated. Its contents are undefined then.
 
         Raises
         ------
         ValueError
             If the size isn't positive or the pixel format is unknown.
         RuntimeError
-            If the FBO is incomplete. The buffer is left unchanged in that case.
+            If the FBO is incomplete.
+        In both cases the buffer is left unchanged.
 
         Notes
         -----
-        * A GL context of the share group must be current.
-        * While the managers' threads are running, only call this inside
-          `BufferManager.write()`: the buffer then belongs to P, and P's GPU
-          queue already waits for C's last use of it.
-        * A new texture and FBO are created instead of re-specifying the
-          existing texture, which would be a hazard for a texture shared
-          between contexts. GL defers deleting the old ones while pending
-          commands still use them.
+        * The calling thread's GL context must be current.
+        * Only call this inside `BufferManager.acquire_write_buffer()`: the
+          buffer then belongs to P, and P's GPU queue already waits for C's
+          last use of it.
         """
-        if width <= 0 or height <= 0:
-            raise ValueError(f"Invalid buffer size {width}x{height}")
-
-        fits_already = (
-            self.is_allocated
-            and width <= self.allocated_width
-            and height <= self.allocated_height
-            and pixel_format == self.pixel_format
-        )
-        if fits_already:
-            return False
-
-        # create the new objects first, so a failure leaves the buffer intact
-        new_texture_id = gl_texture_create(width, height, pixel_format)
-        try:
-            new_fbo_id = gl_fbo_create(new_texture_id)
-        except Exception:
-            gl_texture_destroy(new_texture_id)
-            raise
-
-        gl_fbo_destroy(self.fbo_id)
-        gl_texture_destroy(self.texture_id)
-
-        self.texture_id = new_texture_id
-        self.fbo_id = new_fbo_id
-        self.allocated_width = width
-        self.allocated_height = height
-        self.pixel_format = pixel_format
-        # the new texture holds no frame
-        self.frame_width = 0
-        self.frame_height = 0
-        return True
+        reallocated = self._ensure_capacity(frame_width, frame_height, pixel_format)
+        self.frame_width = frame_width
+        self.frame_height = frame_height
+        return reallocated
 
     def destroy(self) -> None:
         """Delete the texture and FBO. A GL context of the share group must be current."""
@@ -213,9 +197,57 @@ class FrameBuffer:
         self.frame_height = 0
         self.frame_serial = 0
 
+    def _ensure_capacity(self, width: int, height: int, pixel_format: int) -> bool:
+        """Reallocate if the buffer can't hold `width` x `height` of `pixel_format`.
+
+        Returns True if the buffer was (re)allocated. On failure, the buffer
+        is left unchanged. Allocations only grow: each dimension becomes the
+        larger of the requested and the allocated size.
+
+        A new texture and FBO are created instead of re-specifying the existing
+        texture, which would be a hazard for a texture shared between contexts.
+        GL defers deleting the old ones while pending commands still use them.
+        """
+        if width <= 0 or height <= 0:
+            raise ValueError(f"Invalid buffer size {width}x{height}")
+
+        fits_already = (
+            self.is_allocated
+            and width <= self.allocated_width
+            and height <= self.allocated_height
+            and pixel_format == self.pixel_format
+        )
+        if fits_already:
+            return False
+
+        # only grow: a dimension that already fits keeps its allocated size
+        new_width = max(width, self.allocated_width)
+        new_height = max(height, self.allocated_height)
+
+        # create the new objects first, so a failure leaves the buffer intact
+        new_texture_id = gl_texture_create(new_width, new_height, pixel_format)
+        try:
+            new_fbo_id = gl_fbo_create(new_texture_id)
+        except Exception:
+            gl_texture_destroy(new_texture_id)
+            raise
+
+        gl_fbo_destroy(self.fbo_id)
+        gl_texture_destroy(self.texture_id)
+
+        self.texture_id = new_texture_id
+        self.fbo_id = new_fbo_id
+        self.allocated_width = new_width
+        self.allocated_height = new_height
+        self.pixel_format = pixel_format
+        # the new texture holds no frame
+        self.frame_width = 0
+        self.frame_height = 0
+        return True
+
 
 class ReadFrame(NamedTuple):
-    """What `BufferManager.read()` hands to C.
+    """What `BufferManager.acquire_read_buffer()` hands to C.
 
     Attributes
     ----------
@@ -235,8 +267,8 @@ class ReadFrame(NamedTuple):
     frames_skipped: int
 
 
-class _WriteHandle:
-    """Reusable context manager returned by `BufferManager.write()`."""
+class _WriteBufferHandle:
+    """Reusable context manager returned by `BufferManager.acquire_write_buffer()`."""
 
     __slots__ = ("_buffer", "_manager")
 
@@ -245,7 +277,8 @@ class _WriteHandle:
         self._buffer: FrameBuffer | None = None
 
     def __enter__(self) -> FrameBuffer:
-        self._buffer = self._manager._acquire_write_buffer()
+        # on failure, the manager has already undone the claim
+        self._buffer = self._manager._claim_write_buffer()
         return self._buffer
 
     def __exit__(
@@ -270,8 +303,8 @@ class _WriteHandle:
             )
 
 
-class _ReadHandle:
-    """Reusable context manager returned by `BufferManager.read()`."""
+class _ReadBufferHandle:
+    """Reusable context manager returned by `BufferManager.acquire_read_buffer()`."""
 
     __slots__ = ("_frame", "_is_active", "_manager", "timeout")
 
@@ -282,11 +315,13 @@ class _ReadHandle:
         self.timeout = 0.0
 
     def __enter__(self) -> ReadFrame | None:
+        # also catches nesting when the outer block got no frame
         if self._is_active:
-            raise RuntimeError("Nested read() blocks aren't supported")
+            raise RuntimeError("Nested acquire_read_buffer() blocks aren't supported")
         self._is_active = True
         try:
-            self._frame = self._manager._acquire_read_buffer(self.timeout)
+            # on failure, the manager has already undone the claim
+            self._frame = self._manager._claim_read_buffer(self.timeout)
         except BaseException:
             self._is_active = False
             raise
@@ -314,9 +349,10 @@ class _ReadHandle:
 class BufferManager:
     """Thread-safe triple buffering for one producer (P) and one consumer (C).
 
-    P takes a buffer with `write()` whenever a frame arrives, and never waits on
-    the CPU. C takes the freshest finished frame with `read()`, and may wait a
-    limited time for the frame P is rendering.
+    P takes a buffer with `acquire_write_buffer()` whenever a frame arrives, and
+    never waits on the CPU. C takes the freshest finished frame with
+    `acquire_read_buffer()`, and may wait a limited time for the frame P is
+    rendering.
 
     Parameters
     ----------
@@ -328,18 +364,22 @@ class BufferManager:
     Raises
     ------
     ValueError, RuntimeError
-        If allocating the buffers fails (see `FrameBuffer.ensure_capacity()`).
+        If allocating the buffers fails (see `FrameBuffer.set_frame_size()`).
         Buffers allocated up to that point are deleted.
 
     Notes
     -----
     * The constructor and `close()` need a GL context of the share group to
-      be current. `write()` and `read()` need the calling thread's context
-      to be current.
+      be current. `acquire_write_buffer()` and `acquire_read_buffer()` need the
+      calling thread's context to be current.
     * Buffer selection:
         * P takes neither the newest published buffer nor the one C holds,
           and of the rest (one or two buffers) the one with the oldest frame.
         * C takes the newest published buffer that P doesn't hold.
+    * Exceptions are never handled here, only propagated. The manager only
+      keeps its bookkeeping consistent: claims are undone or released, and a
+      buffer whose rendering failed is never shown. How to respond to the
+      exception is up to the caller.
     """
 
     def __init__(self, width: int, height: int, pixel_format: int) -> None:
@@ -350,7 +390,7 @@ class BufferManager:
         self._buffers = tuple(FrameBuffer() for _ in range(BUFFER_COUNT))
         try:
             for buffer in self._buffers:
-                buffer.ensure_capacity(width, height, pixel_format)
+                buffer._ensure_capacity(width, height, pixel_format)
         except Exception:
             for buffer in self._buffers:
                 buffer.destroy()
@@ -365,14 +405,14 @@ class BufferManager:
         self._is_closed = False
 
         # reused for every block, so a frame allocates no context managers
-        self._write_handle = _WriteHandle(self)
-        self._read_handle = _ReadHandle(self)
+        self._write_buffer_handle = _WriteBufferHandle(self)
+        self._read_buffer_handle = _ReadBufferHandle(self)
 
     # ---- public API ----
 
     @property
     def buffers(self) -> tuple[FrameBuffer, ...]:
-        """All buffers, e.g. for inspection. Don't use them outside `write()`/`read()`."""
+        """All buffers, e.g. for inspection. Only use them inside acquire blocks."""
         return self._buffers
 
     @property
@@ -401,28 +441,30 @@ class BufferManager:
     def is_closed(self) -> bool:
         return self._is_closed
 
-    def write(self) -> _WriteHandle:
+    def acquire_write_buffer(self) -> _WriteBufferHandle:
         """Return a context manager that hands P a buffer to render into.
 
         Entering the `with` block takes the buffer and makes P's GPU queue wait
-        until C's last use of it is finished. Leaving it fences P's commands
-        and publishes the frame. If the block raises, the buffer is released
-        without publishing and marked empty, as its contents are unknown.
+        until C's last use of it is finished. Leaving it fences P's commands,
+        releases the buffer and publishes the frame. If the block raises, the
+        buffer is released without publishing, and it's never shown, as its
+        contents are unknown. The exception propagates.
 
         Raises
         ------
         RuntimeError
             On entering, if P already holds a buffer or the manager is closed.
         """
-        return self._write_handle
+        return self._write_buffer_handle
 
-    def read(self, timeout: float = 0.0) -> _ReadHandle:
+    def acquire_read_buffer(self, timeout: float = 0.0) -> _ReadBufferHandle:
         """Return a context manager that hands C the freshest finished frame.
 
         Entering the `with` block binds a `ReadFrame`, or None if no frame was
         published yet (or the manager was closed while waiting). It makes C's
         GPU queue wait until P's rendering of the frame is finished. Leaving
-        it fences C's commands and releases the buffer.
+        it fences C's commands and releases the buffer, also if the block
+        raises. The exception propagates.
 
         Parameters
         ----------
@@ -441,8 +483,8 @@ class BufferManager:
         """
         if timeout is None or timeout < 0:
             raise ValueError(f"timeout must be a number >= 0, got {timeout!r}")
-        self._read_handle.timeout = timeout
-        return self._read_handle
+        self._read_buffer_handle.timeout = timeout
+        return self._read_buffer_handle
 
     def close(self) -> None:
         """Wake a waiting C, delete all fences and buffers. Safe to call repeatedly.
@@ -475,24 +517,39 @@ class BufferManager:
         for buffer in self._buffers:
             buffer.destroy()
 
-    # ---- P side, called by _WriteHandle ----
+    # ---- P side, called by _WriteBufferHandle ----
 
-    def _acquire_write_buffer(self) -> FrameBuffer:
+    def _claim_write_buffer(self) -> FrameBuffer:
         with self._lock:
             if self._is_closed:
                 raise RuntimeError("BufferManager is closed")
             if self._buffer_held_by_writer is not None:
-                raise RuntimeError("Nested write() blocks aren't supported")
+                raise RuntimeError(
+                    "Nested acquire_write_buffer() blocks aren't supported"
+                )
 
             buffer = self._choose_buffer_to_write()
             self._buffer_held_by_writer = buffer
             self._write_started_at = time.perf_counter()
             # take the fence: from now on, only P touches this buffer
             fence_of_last_use = buffer.last_use_fence
+            fence_placed_by_writer = buffer.last_use_fence_placed_by_writer
             buffer.last_use_fence = None
 
-        # GPU waits until C's last draw from this buffer is done
-        _gpu_wait_for_fence_and_delete(fence_of_last_use)
+        try:
+            # GPU waits until C's last draw from this buffer is done
+            _wait_for_fence_and_delete(
+                fence_of_last_use, gpu_wait_needed=not fence_placed_by_writer
+            )
+        except BaseException:
+            # undo the claim, so the buffer stays usable. If only the deletion
+            # failed, the next taker waits on the fence again, which is harmless.
+            with self._lock:
+                buffer.last_use_fence = fence_of_last_use
+                buffer.last_use_fence_placed_by_writer = fence_placed_by_writer
+                self._buffer_held_by_writer = None
+                self._write_started_at = None
+            raise
         return buffer
 
     def _choose_buffer_to_write(self) -> FrameBuffer:
@@ -503,7 +560,8 @@ class BufferManager:
             for buffer in self._buffers
             if buffer is not newest_buffer and buffer is not self._buffer_held_by_reader
         ]
-        # with 3 buffers at least one candidate is left; empty buffers have serial 0
+        # with 3 buffers, one or two candidates are left. Empty and failed
+        # buffers have serial 0, so they are reused first.
         return min(candidates, key=lambda buffer: buffer.frame_serial)
 
     def _release_write_buffer(
@@ -512,6 +570,7 @@ class BufferManager:
         with self._lock:
             replaced_fence = buffer.last_use_fence
             buffer.last_use_fence = completion_fence
+            buffer.last_use_fence_placed_by_writer = True
             self._buffer_held_by_writer = None
             self._write_started_at = None
 
@@ -520,21 +579,26 @@ class BufferManager:
                 buffer.frame_serial = self._published_frame_count
                 self._frame_published.notify()
             else:
-                # contents unknown (rendering failed): never show this buffer
+                # rendering failed, contents unknown: serial 0 hides the buffer
+                # from C, like an empty one
                 buffer.frame_serial = 0
+                buffer.frame_width = 0
+                buffer.frame_height = 0
 
-        # normally None: P took the fence when acquiring the buffer
+        # normally None: P took the fence when claiming the buffer
         if replaced_fence:
             gl.glDeleteSync(replaced_fence)
 
-    # ---- C side, called by _ReadHandle ----
+    # ---- C side, called by _ReadBufferHandle ----
 
-    def _acquire_read_buffer(self, timeout: float) -> ReadFrame | None:
+    def _claim_read_buffer(self, timeout: float) -> ReadFrame | None:
         with self._lock:
             if self._is_closed:
                 raise RuntimeError("BufferManager is closed")
             if self._buffer_held_by_reader is not None:
-                raise RuntimeError("Nested read() blocks aren't supported")
+                raise RuntimeError(
+                    "Nested acquire_read_buffer() blocks aren't supported"
+                )
 
             # wait for the frame P is rendering now, if any, not for later ones
             if timeout > 0 and self._buffer_held_by_writer is not None:
@@ -557,28 +621,42 @@ class BufferManager:
                 return None
 
             self._buffer_held_by_reader = buffer
+            previous_read_frame_serial = self._last_read_frame_serial
             frame_serial = buffer.frame_serial
-            is_new = frame_serial != self._last_read_frame_serial
+            is_new = frame_serial != previous_read_frame_serial
             frames_skipped = (
-                frame_serial - self._last_read_frame_serial - 1 if is_new else 0
+                max(frame_serial - previous_read_frame_serial - 1, 0) if is_new else 0
             )
             self._last_read_frame_serial = frame_serial
             # take the fence: P can't take this buffer until C releases it
             fence_of_last_use = buffer.last_use_fence
+            fence_placed_by_writer = buffer.last_use_fence_placed_by_writer
             buffer.last_use_fence = None
 
-        # GPU waits until P's rendering into this buffer is done
-        _gpu_wait_for_fence_and_delete(fence_of_last_use)
-        return ReadFrame(buffer, frame_serial, is_new, max(frames_skipped, 0))
+        try:
+            # GPU waits until P's rendering into this buffer is done
+            _wait_for_fence_and_delete(
+                fence_of_last_use, gpu_wait_needed=fence_placed_by_writer
+            )
+        except BaseException:
+            # undo the claim, so the buffer stays usable (see _claim_write_buffer)
+            with self._lock:
+                buffer.last_use_fence = fence_of_last_use
+                buffer.last_use_fence_placed_by_writer = fence_placed_by_writer
+                self._buffer_held_by_reader = None
+                self._last_read_frame_serial = previous_read_frame_serial
+            raise
+        return ReadFrame(buffer, frame_serial, is_new, frames_skipped)
 
     def _release_read_buffer(self, buffer: FrameBuffer, completion_fence: Any) -> None:
         with self._lock:
             replaced_fence = buffer.last_use_fence
             buffer.last_use_fence = completion_fence
+            buffer.last_use_fence_placed_by_writer = False
             self._buffer_held_by_reader = None
             # no notify: P never waits on the CPU
 
-        # normally None: C took the fence when acquiring the buffer
+        # normally None: C took the fence when claiming the buffer
         if replaced_fence:
             gl.glDeleteSync(replaced_fence)
 
