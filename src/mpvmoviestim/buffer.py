@@ -1,8 +1,10 @@
 """Triple-buffered frame exchange between one producer and one consumer thread.
 
 The producer (P) renders video frames into intermediate buffers as soon as they
-arrive, the consumer (C) draws the freshest finished frame to the screen. Both
-threads use OpenGL contexts of the same share group.
+arrive, the consumer (C) draws the freshest finished frame to the screen. C can
+wait a limited time (`timeout`) for the frame P is rendering at the time, in
+order to get the freshest frame possible. Both threads use OpenGL contexts of
+the same share group. Pyglet ensures that FBOs and textures are shared.
 
 `BufferManager` owns three `FrameBuffer`s and does all synchronisation:
 
