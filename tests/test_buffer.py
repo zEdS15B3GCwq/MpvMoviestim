@@ -1,12 +1,14 @@
-"""Tests for `mpvmoviestim.buffer`: FrameBuffer and BufferManager.
+"""Tests for `mpvmoviestim.buffer`: FrameBuffer and TripleBufferManager.
 
 Three groups:
 
 1. Logic tests with fake GL and allocation functions: buffer selection, fence
-   handoff, error bookkeeping, misuse, resizing. No GPU needed.
+   handoff, shutdown and error paths, resizing. No GPU needed.
 2. Threaded timing tests, also with fake GL: C's optional wait for P.
 3. A GL integration test with real shared contexts, skipped if no GL context
    can be created.
+
+The tests only use the public API, as P and C would.
 """
 
 from __future__ import annotations
@@ -54,18 +56,22 @@ def _import_package_modules() -> tuple[types.ModuleType, types.ModuleType]:
 
 
 buffer_module, utils_module = _import_package_modules()
-BufferManager = buffer_module.BufferManager
-FrameBuffer = buffer_module.FrameBuffer
+TripleBufferManager = buffer_module.TripleBufferManager
 
 GL_RGBA8 = 0x8058
 GL_RGBA16F = 0x881A
+SIZE = 16
 
 
 # ---- fakes ----
 
 
 class FakeGL:
-    """Records fence calls and checks that fences are used correctly."""
+    """Records fence calls, and which thread role placed and waited on each fence.
+
+    Tests set `role` ("P" or "C") before acting as that thread; the threaded
+    tests leave it alone and don't check roles.
+    """
 
     GL_SYNC_GPU_COMMANDS_COMPLETE = 0x9117
     GL_TIMEOUT_IGNORED = 0xFFFFFFFFFFFFFFFF
@@ -73,10 +79,10 @@ class FakeGL:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._next_fence = 1
+        self.role = "?"
         self.live_fences: set[int] = set()
-        self.created_fences: list[int] = []
-        self.waited_fences: list[int] = []
-        self.deleted_fences: list[int] = []
+        self.fence_creator: dict[int, str] = {}
+        self.waits: list[tuple[str, int]] = []  # (waiting role, fence)
         self.flush_count = 0
         self.fail_next_wait = False
 
@@ -87,7 +93,7 @@ class FakeGL:
             fence = self._next_fence
             self._next_fence += 1
             self.live_fences.add(fence)
-            self.created_fences.append(fence)
+            self.fence_creator[fence] = self.role
         return fence
 
     def glFlush(self) -> None:
@@ -102,51 +108,53 @@ class FakeGL:
             if self.fail_next_wait:
                 self.fail_next_wait = False
                 raise RuntimeError("simulated glWaitSync failure")
-            self.waited_fences.append(fence)
+            self.waits.append((self.role, fence))
 
     def glDeleteSync(self, fence: int) -> None:
         with self._lock:
             assert fence in self.live_fences, f"fence {fence} deleted twice"
             self.live_fences.remove(fence)
-            self.deleted_fences.append(fence)
 
 
 class FakeAllocator:
     """Stands in for the texture and FBO helpers of utils.py."""
 
     def __init__(self) -> None:
+        self._lock = threading.Lock()
         self._next_name = 1
-        self.live_textures: set[int] = set()
+        self.live_textures: dict[int, tuple[int, int, int]] = {}  # id -> w, h, format
         self.live_fbos: set[int] = set()
         self.textures_until_failure: int | None = None
         self.fail_next_fbo = False
 
     def gl_texture_create(self, width: int, height: int, pixel_format: int) -> int:
-        if self.textures_until_failure is not None:
-            if self.textures_until_failure == 0:
-                raise ValueError("simulated texture allocation failure")
-            self.textures_until_failure -= 1
-        texture_id = self._next_name
-        self._next_name += 1
-        self.live_textures.add(texture_id)
+        with self._lock:
+            if self.textures_until_failure is not None:
+                if self.textures_until_failure == 0:
+                    raise ValueError("simulated texture allocation failure")
+                self.textures_until_failure -= 1
+            texture_id = self._next_name
+            self._next_name += 1
+            self.live_textures[texture_id] = (width, height, pixel_format)
         return texture_id
 
     def gl_texture_destroy(self, texture_id: int) -> None:
-        if texture_id != 0:
-            self.live_textures.remove(texture_id)
+        with self._lock:
+            del self.live_textures[texture_id]
 
     def gl_fbo_create(self, texture_id: int) -> int:
-        assert texture_id in self.live_textures
-        if self.fail_next_fbo:
-            self.fail_next_fbo = False
-            raise RuntimeError("simulated incomplete FBO")
-        fbo_id = self._next_name
-        self._next_name += 1
-        self.live_fbos.add(fbo_id)
+        with self._lock:
+            assert texture_id in self.live_textures
+            if self.fail_next_fbo:
+                self.fail_next_fbo = False
+                raise RuntimeError("simulated incomplete FBO")
+            fbo_id = self._next_name
+            self._next_name += 1
+            self.live_fbos.add(fbo_id)
         return fbo_id
 
     def gl_fbo_destroy(self, fbo_id: int) -> None:
-        if fbo_id != 0:
+        with self._lock:
             self.live_fbos.remove(fbo_id)
 
 
@@ -172,570 +180,538 @@ def fixture_fake_allocator(monkeypatch: pytest.MonkeyPatch) -> FakeAllocator:
     return fake_allocator
 
 
-@pytest.fixture(name="manager")
-def fixture_manager(fake_gl: FakeGL, fake_allocator: FakeAllocator) -> Iterator[Any]:
-    manager = BufferManager(16, 16, GL_RGBA8)
-    yield manager
-    manager.close()
-    # every fence and GL object is deleted exactly once (FakeGL checks "once")
+def assert_everything_freed(fake_gl: FakeGL, fake_allocator: FakeAllocator) -> None:
     assert fake_gl.live_fences == set()
-    assert fake_allocator.live_textures == set()
+    assert fake_allocator.live_textures == {}
     assert fake_allocator.live_fbos == set()
 
 
-def publish_frame(manager: Any, width: int = 16, height: int = 16) -> Any:
-    """Render and publish one (fake) frame, return the buffer it went into."""
-    with manager.acquire_write_buffer() as buffer:
-        buffer.set_frame_size(width, height, GL_RGBA8)
+@pytest.fixture(name="manager")
+def fixture_manager(fake_gl: FakeGL, fake_allocator: FakeAllocator) -> Iterator[Any]:
+    """A manager that is shut down after the test; checks that nothing leaked."""
+    manager = TripleBufferManager(SIZE, SIZE, GL_RGBA8)
+    yield manager
+    manager.shutdown()
+    assert_everything_freed(fake_gl, fake_allocator)
+
+
+def publish_frame(manager: Any, width: int = SIZE, height: int = SIZE) -> Any:
+    """Render and publish one (fake) frame as P, return its buffer."""
+    buffer = manager.acquire_write_buffer(width, height, GL_RGBA8)
+    manager.release_write_buffer()
+    return buffer
+
+
+def read_frame(manager: Any, timeout: float = 0.0) -> Any:
+    """Acquire and release a frame as C, return its buffer (or None)."""
+    buffer = manager.acquire_read_buffer(timeout)
+    if buffer is not None:
+        manager.release_read_buffer()
     return buffer
 
 
 # ---- construction ----
 
 
-def test_constructor_allocates_all_buffers(manager: Any, fake_allocator: FakeAllocator):
-    assert len(manager.buffers) == 3
-    assert len(fake_allocator.live_textures) == 3
+def test_constructor_allocates_three_buffers(
+    manager: Any, fake_allocator: FakeAllocator
+):
+    assert sorted(fake_allocator.live_textures.values()) == [(SIZE, SIZE, GL_RGBA8)] * 3
     assert len(fake_allocator.live_fbos) == 3
-    for buffer in manager.buffers:
-        assert buffer.is_allocated
-        assert (buffer.allocated_width, buffer.allocated_height) == (16, 16)
-        assert buffer.pixel_format == GL_RGBA8
-        assert buffer.frame_serial == 0
-        assert (buffer.frame_width, buffer.frame_height) == (0, 0)
 
 
-def test_constructor_failure_deletes_allocated_buffers(
+def test_constructor_failure_frees_allocated_buffers(
     fake_gl: FakeGL, fake_allocator: FakeAllocator
 ):
     fake_allocator.textures_until_failure = 2  # the third texture fails
     with pytest.raises(ValueError, match="simulated"):
-        BufferManager(16, 16, GL_RGBA8)
-    assert fake_allocator.live_textures == set()
-    assert fake_allocator.live_fbos == set()
+        TripleBufferManager(SIZE, SIZE, GL_RGBA8)
+    assert_everything_freed(fake_gl, fake_allocator)
+
+
+def test_constructor_frees_texture_of_incomplete_fbo(
+    fake_gl: FakeGL, fake_allocator: FakeAllocator
+):
+    fake_allocator.fail_next_fbo = True
+    with pytest.raises(RuntimeError, match="incomplete FBO"):
+        TripleBufferManager(SIZE, SIZE, GL_RGBA8)
+    assert_everything_freed(fake_gl, fake_allocator)
 
 
 # ---- reading and writing ----
 
 
 def test_read_before_first_frame_gets_none(manager: Any):
-    with manager.acquire_read_buffer() as frame:
-        assert frame is None
+    assert manager.acquire_read_buffer() is None
+    assert manager.acquire_read_buffer(timeout=1.0) is None  # P idle: no wait
+    # nothing was claimed, so releasing raises
+    with pytest.raises(RuntimeError, match="does not hold"):
+        manager.release_read_buffer()
 
 
 def test_published_frame_is_read(manager: Any):
-    written_buffer = publish_frame(manager, 10, 12)
-    assert manager.published_frame_count == 1
+    written = manager.acquire_write_buffer(10, 12, GL_RGBA8)
+    assert written.frame_fbo_info() == {
+        "fbo": written.fbo_id,
+        "w": 10,
+        "h": 12,
+        "internal_format": GL_RGBA8,
+    }
+    manager.release_write_buffer()
 
-    with manager.acquire_read_buffer() as frame:
-        assert frame.buffer is written_buffer
-        assert frame.frame_serial == 1
-        assert frame.is_new
-        assert frame.frames_skipped == 0
-        assert (frame.buffer.frame_width, frame.buffer.frame_height) == (10, 12)
-
-
-def test_repeated_read_is_not_new(manager: Any):
-    publish_frame(manager)
-    with manager.acquire_read_buffer() as first_frame:
-        pass
-    with manager.acquire_read_buffer() as second_frame:
-        assert second_frame.buffer is first_frame.buffer
-        assert second_frame.frame_serial == 1
-        assert not second_frame.is_new
-        assert second_frame.frames_skipped == 0
+    read = manager.acquire_read_buffer()
+    assert read is written
+    assert (read.frame_width, read.frame_height) == (10, 12)
+    manager.release_read_buffer()
 
 
-def test_frames_skipped_counts_frames_never_read(manager: Any):
-    publish_frame(manager)
-    with manager.acquire_read_buffer():
-        pass
-    for _ in range(3):
-        publish_frame(manager)
-    with manager.acquire_read_buffer() as frame:
-        assert frame.frame_serial == 4
-        assert frame.frames_skipped == 2
-
-
-def test_reader_gets_newest_frame_writer_does_not_hold(manager: Any):
+def test_reader_gets_freshest_frame(manager: Any):
     publish_frame(manager)
     publish_frame(manager)
-    with manager.acquire_write_buffer() as buffer_being_written:
-        assert buffer_being_written.frame_serial == 0  # the unused third buffer
-        with manager.acquire_read_buffer() as frame:
-            assert frame.frame_serial == 2
-            assert frame.buffer is not buffer_being_written
+    newest = publish_frame(manager)
+    assert read_frame(manager) is newest
+    assert read_frame(manager) is newest  # repeated read: same frame
 
 
-def test_writer_avoids_newest_and_readers_buffer(manager: Any):
-    first_buffer = publish_frame(manager)
-    second_buffer = publish_frame(manager)
-    third_buffer = publish_frame(manager)
-    assert len({first_buffer, second_buffer, third_buffer}) == 3
+def test_writer_takes_oldest_buffer_not_held_by_reader(manager: Any):
+    first = publish_frame(manager)
+    second = publish_frame(manager)
+    third = publish_frame(manager)
+    assert len({id(first), id(second), id(third)}) == 3
 
-    # C holds the newest frame: P takes the oldest of the other two
-    with manager.acquire_read_buffer() as frame:
-        assert frame.buffer is third_buffer
-        with manager.acquire_write_buffer() as buffer:
-            assert buffer is first_buffer
+    # C holds nothing: P takes the oldest
+    assert publish_frame(manager) is first  # order now: first, third, second
 
-    # now frame 4 is newest (first buffer); C holds an older one (third buffer)
-    with manager.acquire_read_buffer() as frame:
-        assert frame.buffer is first_buffer
-    # P: not the newest (first), so the oldest of second and third
-    with manager.acquire_write_buffer() as buffer:
-        assert buffer is second_buffer
+    # C holds the freshest (first): P takes the oldest (second)
+    assert manager.acquire_read_buffer() is first
+    assert publish_frame(manager) is second  # order: second, first, third
+    manager.release_read_buffer()
+
+    # C holds the oldest (third): P takes the second oldest (first)
+    publish_frame(manager)  # third: order: third, second, first
+    assert manager.acquire_read_buffer() is third
+    publish_frame(manager)  # first: order: first, third, second
+    publish_frame(manager)  # second: order: second, first, third (C holds third)
+    assert manager.acquire_write_buffer(SIZE, SIZE, GL_RGBA8) is first
+    manager.release_write_buffer()
+    manager.release_read_buffer()
+
+
+def test_reader_gets_freshest_while_writer_renders(manager: Any):
+    newest = publish_frame(manager)
+    being_written = manager.acquire_write_buffer(SIZE, SIZE, GL_RGBA8)
+    assert being_written is not newest
+    assert manager.acquire_read_buffer() is newest
+    manager.release_read_buffer()
+    manager.release_write_buffer()
 
 
 @pytest.mark.parametrize("seed", range(5))
 def test_random_interleavings_keep_invariants(
     seed: int, fake_gl: FakeGL, fake_allocator: FakeAllocator
 ):
-    """Random single-threaded interleavings of P and C blocks, checked step by step."""
+    """Random single-threaded interleavings of P and C, checked step by step.
+
+    Checks buffer selection and that each side's GPU queue waits exactly on
+    the other side's fences, using only what P and C can observe.
+    """
     rng = random.Random(seed)
-    manager = BufferManager(16, 16, GL_RGBA8)
-    write_handle = manager.acquire_write_buffer()
-    held_write_buffer = None
-    held_read_frame = None
-    last_read_serial = 0
+    manager = TripleBufferManager(SIZE, SIZE, GL_RGBA8)
+    publish_index: dict[int, int] = {}  # id(buffer) -> when it was last published
+    last_fence_role: dict[int, str] = {}  # id(buffer) -> role of its last fence
+    texture_seen: dict[int, int] = {}  # id(buffer) -> texture_id when P last took it
+    writer_buffer = None
+    reader_buffer = None
+    published_count = 0
+
+    def allowed_for_writer(buffer: Any) -> bool:
+        freshest = max(publish_index, key=publish_index.__getitem__, default=None)
+        return id(buffer) != freshest and buffer is not reader_buffer
 
     for _ in range(2000):
-        # snapshot of each buffer's serial and fence slot before the next step
-        serials = {buffer: buffer.frame_serial for buffer in manager.buffers}
-        fences = {
-            buffer: (buffer.last_use_fence, buffer.last_use_fence_placed_by_writer)
-            for buffer in manager.buffers
-        }
-        published = [buffer for buffer in manager.buffers if serials[buffer] > 0]
-        newest = max(published, key=serials.__getitem__) if published else None
-        waits_before = len(fake_gl.waited_fences)
-
         action = rng.choice(("write", "read"))
-        if action == "write" and held_write_buffer is None:
-            held_write_buffer = write_handle.__enter__()
-            reader_buffer = held_read_frame.buffer if held_read_frame else None
-            allowed = [
-                b for b in manager.buffers if b is not newest and b is not reader_buffer
-            ]
-            assert held_write_buffer in allowed
-            assert serials[held_write_buffer] == min(serials[b] for b in allowed)
-            # GPU wait only on C's fence
-            fence, placed_by_writer = fences[held_write_buffer]
-            expected_waits = 1 if fence and not placed_by_writer else 0
-            assert len(fake_gl.waited_fences) - waits_before == expected_waits
-            held_write_buffer.set_frame_size(rng.choice((8, 16, 24)), 16, GL_RGBA8)
+        waits_before = len(fake_gl.waits)
+
+        if action == "write" and writer_buffer is None:
+            fake_gl.role = "P"
+            size = rng.choice((8, 16, 24))
+            writer_buffer = manager.acquire_write_buffer(size, SIZE, GL_RGBA8)
+            assert allowed_for_writer(writer_buffer)
+            # a reallocated buffer has a new texture, and its fence is dropped
+            previous_texture = texture_seen.get(id(writer_buffer))
+            reallocated = previous_texture not in (None, writer_buffer.texture_id)
+            texture_seen[id(writer_buffer)] = writer_buffer.texture_id
+            if reallocated:
+                last_fence_role.pop(id(writer_buffer), None)
+            expected_wait = last_fence_role.get(id(writer_buffer)) == "C"
+            assert len(fake_gl.waits) - waits_before == int(expected_wait)
+            assert writer_buffer.frame_width == size
 
         elif action == "write":
-            render_fails = rng.random() < 0.1
-            exception = RuntimeError("render failed") if render_fails else None
-            write_handle.__exit__(
-                type(exception) if exception else None, exception, None
-            )
-            if render_fails:
-                assert held_write_buffer.frame_serial == 0
-            else:
-                assert held_write_buffer.frame_serial == manager.published_frame_count
-            held_write_buffer = None
+            fake_gl.role = "P"
+            manager.release_write_buffer()
+            published_count += 1
+            publish_index[id(writer_buffer)] = published_count
+            last_fence_role[id(writer_buffer)] = "P"
+            writer_buffer = None
 
-        elif held_read_frame is None:
-            read_handle = manager.acquire_read_buffer()
-            held_read_frame = read_handle.__enter__()
-            candidates = [b for b in published if b is not held_write_buffer]
-            expected = max(candidates, key=serials.__getitem__) if candidates else None
-            if expected is None:
-                assert held_read_frame is None
-                read_handle.__exit__(None, None, None)
+        elif reader_buffer is None:
+            fake_gl.role = "C"
+            reader_buffer = manager.acquire_read_buffer()
+            if published_count == 0:
+                assert reader_buffer is None
                 continue
-            assert held_read_frame.buffer is expected
-            assert held_read_frame.frame_serial >= last_read_serial
-            last_read_serial = held_read_frame.frame_serial
-            # GPU wait only on P's fence
-            fence, placed_by_writer = fences[expected]
-            expected_waits = 1 if fence and placed_by_writer else 0
-            assert len(fake_gl.waited_fences) - waits_before == expected_waits
+            freshest = max(publish_index, key=publish_index.__getitem__)
+            assert id(reader_buffer) == freshest
+            expected_wait = last_fence_role.get(id(reader_buffer)) == "P"
+            assert len(fake_gl.waits) - waits_before == int(expected_wait)
 
         else:
-            manager.acquire_read_buffer().__exit__(None, None, None)
-            held_read_frame = None
+            fake_gl.role = "C"
+            manager.release_read_buffer()
+            last_fence_role[id(reader_buffer)] = "C"
+            reader_buffer = None
 
-    if held_write_buffer is not None:
-        write_handle.__exit__(None, None, None)
-    if held_read_frame is not None:
-        manager.acquire_read_buffer().__exit__(None, None, None)
-    manager.close()
-    assert fake_gl.live_fences == set()
-    assert fake_allocator.live_textures == set()
+        # every wait is on the other side's fence
+        for waiting_role, fence in fake_gl.waits[waits_before:]:
+            assert fake_gl.fence_creator[fence] != waiting_role
+
+    # P shuts down (also freeing its own buffer), C releases afterwards
+    manager.shutdown()
+    if reader_buffer is not None:
+        manager.release_read_buffer()
+    assert_everything_freed(fake_gl, fake_allocator)
 
 
 # ---- fences ----
 
 
-def test_fence_handoff_skips_own_fences(manager: Any, fake_gl: FakeGL):
+def test_reader_waits_on_writers_fence_only(manager: Any, fake_gl: FakeGL):
+    fake_gl.role = "P"
     publish_frame(manager)
-    writer_fence = fake_gl.created_fences[-1]
-
-    # C waits on P's fence
-    with manager.acquire_read_buffer():
-        assert fake_gl.waited_fences == [writer_fence]
-    reader_fence = fake_gl.created_fences[-1]
-
-    # repeated read: C's own fence is deleted, but not waited on
-    with manager.acquire_read_buffer():
-        assert fake_gl.waited_fences == [writer_fence]
-        assert reader_fence in fake_gl.deleted_fences
+    fake_gl.role = "C"
+    read_frame(manager)
+    read_frame(manager)  # C's own fence: deleted, but not waited on
+    assert [fake_gl.fence_creator[fence] for _, fence in fake_gl.waits] == ["P"]
 
 
-def test_writer_waits_on_readers_fence(manager: Any, fake_gl: FakeGL):
-    first_buffer = publish_frame(manager)
-    with manager.acquire_read_buffer():
-        pass
-    reader_fence = fake_gl.created_fences[-1]
+def test_writer_waits_on_readers_fence_only(manager: Any, fake_gl: FakeGL):
+    fake_gl.role = "P"
+    first = publish_frame(manager)
+    fake_gl.role = "C"
+    read_frame(manager)  # first now carries C's fence
+    fake_gl.role = "P"
     publish_frame(manager)
     publish_frame(manager)
+    waits_before = len(fake_gl.waits)
+    assert manager.acquire_write_buffer(SIZE, SIZE, GL_RGBA8) is first
+    new_waits = fake_gl.waits[waits_before:]
+    assert [fake_gl.fence_creator[fence] for _, fence in new_waits] == ["C"]
+    manager.release_write_buffer()
 
-    # P now takes the first buffer again, which C used last
-    with manager.acquire_write_buffer() as buffer:
-        assert buffer is first_buffer
-        assert fake_gl.waited_fences[-1] == reader_fence
+
+def test_writer_skips_own_fence(manager: Any, fake_gl: FakeGL):
+    # C never reads: every buffer P reuses carries P's own fence
+    fake_gl.role = "P"
+    for _ in range(6):
+        publish_frame(manager)
+    assert fake_gl.waits == []
+
+
+def test_reallocation_drops_fence_without_waiting(manager: Any, fake_gl: FakeGL):
+    fake_gl.role = "P"
+    first = publish_frame(manager)
+    fake_gl.role = "C"
+    read_frame(manager)  # first carries C's fence
+    fake_gl.role = "P"
+    publish_frame(manager)
+    publish_frame(manager)
+    assert manager.acquire_write_buffer(2 * SIZE, SIZE, GL_RGBA8) is first
+    assert fake_gl.waits == [("C", 1)]  # only C's earlier wait on P's first fence
+    manager.release_write_buffer()
 
 
 def test_every_release_flushes(manager: Any, fake_gl: FakeGL):
     publish_frame(manager)
-    with manager.acquire_read_buffer():
-        pass
+    read_frame(manager)
     assert fake_gl.flush_count == 2
 
 
-# ---- errors ----
+# ---- shutdown and errors ----
 
 
-def test_failed_render_is_hidden_and_reused_first(manager: Any, fake_gl: FakeGL):
-    shown_buffer = publish_frame(manager)
-
-    with (
-        pytest.raises(RuntimeError, match="render failed"),
-        manager.acquire_write_buffer() as failed_buffer,
-    ):
-        failed_buffer.set_frame_size(16, 16, GL_RGBA8)
-        raise RuntimeError("render failed")
-
-    assert not manager.write_buffer_is_held
-    assert manager.published_frame_count == 1
-    assert failed_buffer.frame_serial == 0
-    assert (failed_buffer.frame_width, failed_buffer.frame_height) == (0, 0)
-    assert failed_buffer.last_use_fence  # still fenced: commands may be queued
-
-    with manager.acquire_read_buffer() as frame:
-        assert frame.buffer is shown_buffer
-
-    with manager.acquire_write_buffer() as buffer:
-        assert buffer.frame_serial == 0  # an empty or failed buffer comes first
-
-
-def test_exception_in_read_block_releases_buffer(manager: Any):
+def test_shutdown_is_idempotent_and_blocks_further_use(
+    fake_gl: FakeGL, fake_allocator: FakeAllocator
+):
+    manager = TripleBufferManager(SIZE, SIZE, GL_RGBA8)
     publish_frame(manager)
-    with pytest.raises(KeyError), manager.acquire_read_buffer() as frame:
-        raise KeyError("draw failed")
-    assert frame.buffer.last_use_fence  # fenced
-    with manager.acquire_read_buffer() as frame_again:
-        assert frame_again.buffer is frame.buffer
+    manager.shutdown()
+    manager.shutdown()
+    assert_everything_freed(fake_gl, fake_allocator)
+    with pytest.raises(RuntimeError, match="not active"):
+        manager.acquire_write_buffer(SIZE, SIZE, GL_RGBA8)
+    with pytest.raises(RuntimeError, match="not active"):
+        manager.acquire_read_buffer()
+    manager.release_write_buffer()  # does nothing after shutdown
 
 
-def test_failed_gpu_wait_undoes_write_claim(manager: Any, fake_gl: FakeGL):
-    # make P's next buffer one that C used last, so P has to wait on C's fence
-    first_buffer = publish_frame(manager)
-    with manager.acquire_read_buffer():
-        pass
-    reader_fence = fake_gl.created_fences[-1]
+def test_failed_render_is_never_shown_and_freed_by_shutdown(
+    fake_gl: FakeGL, fake_allocator: FakeAllocator
+):
+    manager = TripleBufferManager(SIZE, SIZE, GL_RGBA8)
+    shown = publish_frame(manager)
+
+    # P's render fails: P doesn't release, its loop-level finally shuts down
+    with pytest.raises(KeyError):
+        try:
+            failed = manager.acquire_write_buffer(SIZE, SIZE, GL_RGBA8)
+            assert manager.acquire_read_buffer() is shown  # C never gets `failed`
+            manager.release_read_buffer()
+            raise KeyError("render failed")
+        finally:
+            manager.shutdown()
+
+    assert failed.texture_id == 0  # P's own buffer was freed too
+    assert_everything_freed(fake_gl, fake_allocator)
+
+
+def test_shutdown_leaves_readers_buffer_to_reader(
+    fake_gl: FakeGL, fake_allocator: FakeAllocator
+):
+    manager = TripleBufferManager(SIZE, SIZE, GL_RGBA8)
     publish_frame(manager)
-    publish_frame(manager)
+    held_by_reader = manager.acquire_read_buffer()
 
-    fake_gl.fail_next_wait = True
-    with (
-        pytest.raises(RuntimeError, match="simulated glWaitSync"),
-        manager.acquire_write_buffer(),
-    ):
-        pytest.fail("block must not run")
+    manager.shutdown()
+    assert held_by_reader.texture_id in fake_allocator.live_textures  # still drawable
+    assert len(fake_allocator.live_textures) == 1
 
-    assert not manager.write_buffer_is_held
-    assert manager.write_started_at is None
-    assert first_buffer.last_use_fence == reader_fence  # put back
-    assert reader_fence in fake_gl.live_fences
-
-    with manager.acquire_write_buffer() as buffer:
-        assert buffer is first_buffer
-        assert fake_gl.waited_fences[-1] == reader_fence
+    manager.release_read_buffer()  # C frees it
+    assert held_by_reader.texture_id == 0
+    assert_everything_freed(fake_gl, fake_allocator)
 
 
-def test_failed_gpu_wait_undoes_read_claim(manager: Any, fake_gl: FakeGL):
-    written_buffer = publish_frame(manager)
-    writer_fence = fake_gl.created_fences[-1]
-
-    fake_gl.fail_next_wait = True
-    with (
-        pytest.raises(RuntimeError, match="simulated glWaitSync"),
-        manager.acquire_read_buffer(),
-    ):
-        pytest.fail("block must not run")
-
-    assert written_buffer.last_use_fence == writer_fence  # put back
-    with manager.acquire_read_buffer() as frame:
-        assert frame.buffer is written_buffer
-        assert frame.is_new  # the failed read didn't count
-        assert fake_gl.waited_fences == [writer_fence]
+def test_failed_reallocation_then_shutdown_frees_everything(
+    fake_gl: FakeGL, fake_allocator: FakeAllocator
+):
+    manager = TripleBufferManager(SIZE, SIZE, GL_RGBA8)
+    fake_allocator.fail_next_fbo = True
+    try:
+        with pytest.raises(RuntimeError, match="incomplete FBO"):
+            manager.acquire_write_buffer(2 * SIZE, 2 * SIZE, GL_RGBA8)
+    finally:
+        manager.shutdown()
+    assert_everything_freed(fake_gl, fake_allocator)
 
 
-# ---- misuse ----
+@pytest.mark.parametrize("size", [(0, SIZE), (SIZE, 0), (-1, SIZE)])
+def test_invalid_frame_size_raises(manager: Any, size: tuple[int, int]):
+    with pytest.raises(ValueError, match="positive"):
+        manager.acquire_write_buffer(*size, GL_RGBA8)
 
 
-@pytest.mark.parametrize("bad_timeout", [None, -0.001, -1])
-def test_invalid_timeout_is_rejected(manager: Any, bad_timeout: Any):
-    with pytest.raises(ValueError, match="timeout"):
-        manager.acquire_read_buffer(timeout=bad_timeout)
+def test_misuse_raises(manager: Any):
+    with pytest.raises(RuntimeError, match="does not hold"):
+        manager.release_write_buffer()
+    with pytest.raises(RuntimeError, match="does not hold"):
+        manager.release_read_buffer()
 
+    manager.acquire_write_buffer(SIZE, SIZE, GL_RGBA8)
+    with pytest.raises(RuntimeError, match="already holds"):
+        manager.acquire_write_buffer(SIZE, SIZE, GL_RGBA8)
+    manager.release_write_buffer()
 
-def test_nested_write_blocks_raise(manager: Any):
-    with (
-        manager.acquire_write_buffer(),
-        pytest.raises(RuntimeError, match="Nested"),
-        manager.acquire_write_buffer(),
-    ):
-        pass
-    assert not manager.write_buffer_is_held
-
-
-def test_nested_read_blocks_raise(manager: Any):
-    # also when the outer block got no frame
-    with manager.acquire_read_buffer() as frame:
-        assert frame is None
-        with (
-            pytest.raises(RuntimeError, match="Nested"),
-            manager.acquire_read_buffer(),
-        ):
-            pass
-
-    publish_frame(manager)
-    with manager.acquire_read_buffer() as frame:
-        assert frame is not None
-        with (
-            pytest.raises(RuntimeError, match="Nested"),
-            manager.acquire_read_buffer(),
-        ):
-            pass
-
-
-def test_use_after_close_raises(fake_gl: FakeGL, fake_allocator: FakeAllocator):
-    manager = BufferManager(16, 16, GL_RGBA8)
-    publish_frame(manager)
-    manager.close()
-    manager.close()  # repeated close is fine
-    assert manager.is_closed
-    assert fake_gl.live_fences == set()
-    assert fake_allocator.live_textures == set()
-    with (
-        pytest.raises(RuntimeError, match="closed"),
-        manager.acquire_write_buffer(),
-    ):
-        pass
-    with pytest.raises(RuntimeError, match="closed"), manager.acquire_read_buffer():
-        pass
+    manager.acquire_read_buffer()
+    with pytest.raises(RuntimeError, match="already holds"):
+        manager.acquire_read_buffer()
+    manager.release_read_buffer()
 
 
 # ---- frame size and reallocation ----
 
 
 def test_smaller_frame_reuses_allocation(manager: Any, fake_allocator: FakeAllocator):
-    with manager.acquire_write_buffer() as buffer:
-        texture_before = buffer.texture_id
-        assert buffer.set_frame_size(8, 4, GL_RGBA8) is False
-        assert buffer.texture_id == texture_before
-        assert (buffer.allocated_width, buffer.allocated_height) == (16, 16)
-        assert (buffer.frame_width, buffer.frame_height) == (8, 4)
+    buffer = manager.acquire_write_buffer(8, 4, GL_RGBA8)
+    assert fake_allocator.live_textures[buffer.texture_id] == (SIZE, SIZE, GL_RGBA8)
+    assert (buffer.allocated_width, buffer.allocated_height) == (SIZE, SIZE)
+    assert (buffer.frame_width, buffer.frame_height) == (8, 4)
+    manager.release_write_buffer()
 
 
-def test_larger_frame_reallocates(manager: Any, fake_allocator: FakeAllocator):
-    with manager.acquire_write_buffer() as buffer:
-        texture_before, fbo_before = buffer.texture_id, buffer.fbo_id
-        assert buffer.set_frame_size(32, 8, GL_RGBA8) is True
-        assert buffer.texture_id != texture_before
-        assert texture_before not in fake_allocator.live_textures
-        assert fbo_before not in fake_allocator.live_fbos
-        assert (buffer.allocated_width, buffer.allocated_height) == (32, 16)
-        assert (buffer.frame_width, buffer.frame_height) == (32, 8)
+def test_larger_frame_grows_each_dimension(manager: Any, fake_allocator: FakeAllocator):
+    textures_before = set(fake_allocator.live_textures)
+    buffer = manager.acquire_write_buffer(2 * SIZE, SIZE // 2, GL_RGBA8)
+    assert buffer.texture_id not in textures_before
+    assert len(fake_allocator.live_textures) == 3  # the old texture was freed
+    # width grows, height keeps the larger allocated size
+    assert (buffer.allocated_width, buffer.allocated_height) == (2 * SIZE, SIZE)
+    assert (buffer.frame_width, buffer.frame_height) == (2 * SIZE, SIZE // 2)
+    manager.release_write_buffer()
 
 
-def test_pixel_format_change_reallocates(manager: Any):
-    with manager.acquire_write_buffer() as buffer:
-        assert buffer.set_frame_size(8, 8, GL_RGBA16F) is True
-        assert buffer.pixel_format == GL_RGBA16F
+def test_pixel_format_change_reallocates_once(manager: Any):
+    publish_frame(manager)
+    publish_frame(manager)
+    buffer = manager.acquire_write_buffer(SIZE, SIZE, GL_RGBA16F)
+    texture_after_change = buffer.texture_id
+    assert buffer.pixel_format == GL_RGBA16F
+    manager.release_write_buffer()
+    # cycle back to the same buffer: same format again doesn't reallocate
+    for _ in range(2):
+        manager.acquire_write_buffer(SIZE, SIZE, GL_RGBA16F)
+        manager.release_write_buffer()
+    assert manager.acquire_write_buffer(SIZE, SIZE, GL_RGBA16F) is buffer
+    assert buffer.texture_id == texture_after_change
+    manager.release_write_buffer()
 
 
-@pytest.mark.parametrize("size", [(0, 16), (16, 0), (-1, 16)])
-def test_invalid_frame_size_leaves_buffer_unchanged(
-    manager: Any, size: tuple[int, int]
-):
-    with (
-        pytest.raises(ValueError, match="Invalid buffer size"),
-        manager.acquire_write_buffer() as buffer,
-    ):
-        texture_before = buffer.texture_id
-        buffer.set_frame_size(*size, GL_RGBA8)
-    assert buffer.texture_id == texture_before
-    assert buffer.is_allocated
+# ---- hint ----
 
 
-def test_incomplete_fbo_leaves_buffer_unchanged(
-    manager: Any, fake_allocator: FakeAllocator
-):
-    fake_allocator.fail_next_fbo = True
-    with (
-        pytest.raises(RuntimeError, match="incomplete FBO"),
-        manager.acquire_write_buffer() as buffer,
-    ):
-        texture_before, fbo_before = buffer.texture_id, buffer.fbo_id
-        buffer.set_frame_size(64, 64, GL_RGBA8)
-    assert (buffer.texture_id, buffer.fbo_id) == (texture_before, fbo_before)
-    assert (buffer.allocated_width, buffer.allocated_height) == (16, 16)
-    # the new texture was deleted again: 3 buffers, 3 textures
-    assert len(fake_allocator.live_textures) == 3
-
-
-# ---- hints ----
-
-
-def test_write_hints(manager: Any):
+def test_write_buffer_is_held(manager: Any):
     assert not manager.write_buffer_is_held
-    assert manager.write_started_at is None
-    before = time.perf_counter()
-    with manager.acquire_write_buffer():
-        assert manager.write_buffer_is_held
-        assert manager.write_started_at >= before
+    manager.acquire_write_buffer(SIZE, SIZE, GL_RGBA8)
+    assert manager.write_buffer_is_held
+    manager.release_write_buffer()
     assert not manager.write_buffer_is_held
-    assert manager.write_started_at is None
 
 
 # ---- threaded: C's optional wait ----
 
 
 class HeldWrite:
-    """Holds a write block on another thread until `finish()` is called."""
+    """P on another thread: holds a buffer until told to release or shut down."""
 
     def __init__(self, manager: Any) -> None:
         self._manager = manager
-        self._started = threading.Event()
-        self._finish = threading.Event()
+        self._acquired = threading.Event()
+        self._go = threading.Event()
+        self._shutdown_instead = False
+        self.buffer: Any = None
         self._thread = threading.Thread(target=self._run, daemon=True)
 
     def _run(self) -> None:
-        with self._manager.acquire_write_buffer() as buffer:
-            buffer.set_frame_size(16, 16, GL_RGBA8)
-            self._started.set()
-            self._finish.wait(timeout=10)
+        self.buffer = self._manager.acquire_write_buffer(SIZE, SIZE, GL_RGBA8)
+        self._acquired.set()
+        self._go.wait(timeout=10)
+        if self._shutdown_instead:
+            self._manager.shutdown()
+        else:
+            self._manager.release_write_buffer()
 
     def __enter__(self) -> HeldWrite:  # noqa: PYI034
         self._thread.start()
-        assert self._started.wait(timeout=5)
+        assert self._acquired.wait(timeout=5)
         return self
 
-    def finish(self, delay: float = 0.0) -> None:
-        if delay:
-            threading.Timer(delay, self._finish.set).start()
-        else:
-            self._finish.set()
+    def release(self, delay: float = 0.0) -> None:
+        threading.Timer(delay, self._go.set).start()
+
+    def shut_down(self, delay: float = 0.0) -> None:
+        self._shutdown_instead = True
+        threading.Timer(delay, self._go.set).start()
 
     def __exit__(self, *exc_info: object) -> None:
-        self._finish.set()
+        self._go.set()
         self._thread.join(timeout=5)
 
 
+def timed_read(manager: Any, timeout: float) -> tuple[Any, float]:
+    """Acquire and release as C; return the buffer and how long acquiring took."""
+    started = time.perf_counter()
+    buffer = manager.acquire_read_buffer(timeout)
+    elapsed = time.perf_counter() - started
+    if buffer is not None:
+        manager.release_read_buffer()
+    return buffer, elapsed
+
+
 def test_zero_timeout_does_not_wait(manager: Any):
-    publish_frame(manager)
+    previous = publish_frame(manager)
     with HeldWrite(manager):
-        started = time.perf_counter()
-        with manager.acquire_read_buffer(timeout=0) as frame:
-            elapsed = time.perf_counter() - started
-        assert frame.frame_serial == 1
-        assert elapsed < 0.05
+        buffer, elapsed = timed_read(manager, timeout=0)
+    assert buffer is previous
+    assert elapsed < 0.05
 
 
 def test_no_wait_when_writer_is_idle(manager: Any):
-    publish_frame(manager)
-    started = time.perf_counter()
-    with manager.acquire_read_buffer(timeout=5) as frame:
-        elapsed = time.perf_counter() - started
-    assert frame.frame_serial == 1
+    previous = publish_frame(manager)
+    buffer, elapsed = timed_read(manager, timeout=5)
+    assert buffer is previous
     assert elapsed < 0.5
 
 
 def test_reader_waits_for_frame_in_flight(manager: Any):
     publish_frame(manager)
     with HeldWrite(manager) as held_write:
-        held_write.finish(delay=0.05)
-        started = time.perf_counter()
-        with manager.acquire_read_buffer(timeout=5) as frame:
-            elapsed = time.perf_counter() - started
-    assert frame.frame_serial == 2
+        held_write.release(delay=0.05)
+        buffer, elapsed = timed_read(manager, timeout=5)
+        assert buffer is held_write.buffer
     assert 0.03 < elapsed < 2
 
 
 def test_reader_wait_times_out(manager: Any):
-    publish_frame(manager)
+    previous = publish_frame(manager)
     with HeldWrite(manager):
-        started = time.perf_counter()
-        with manager.acquire_read_buffer(timeout=0.05) as frame:
-            elapsed = time.perf_counter() - started
-        assert frame.frame_serial == 1  # the frame P finished before
-        assert 0.03 < elapsed < 2
+        buffer, elapsed = timed_read(manager, timeout=0.05)
+    assert buffer is previous  # the frame P finished before
+    assert 0.03 < elapsed < 2
 
 
-def test_reader_gets_published_frame_when_writer_restarts(manager: Any):
+def test_reader_waits_for_first_frame(manager: Any):
+    with HeldWrite(manager) as held_write:
+        held_write.release(delay=0.05)
+        buffer, _ = timed_read(manager, timeout=5)
+        assert buffer is held_write.buffer
+
+
+def test_first_frame_wait_times_out_with_none(manager: Any):
+    with HeldWrite(manager):
+        buffer, elapsed = timed_read(manager, timeout=0.05)
+    assert buffer is None
+    assert 0.03 < elapsed < 2
+
+
+def test_reader_gets_awaited_frame_when_writer_restarts(manager: Any):
     """P publishes and starts the next frame before C wakes: C gets the published one."""
     publish_frame(manager)
-    second_write_started = threading.Event()
-    release_second_write = threading.Event()
-    release_first_write = threading.Event()
-    first_write_started = threading.Event()
+    first_acquired = threading.Event()
+    release_first = threading.Event()
+    second_acquired = threading.Event()
+    release_second = threading.Event()
+    written: list[Any] = []
 
     def writer() -> None:
-        with manager.acquire_write_buffer():
-            first_write_started.set()
-            release_first_write.wait(timeout=5)
-        with manager.acquire_write_buffer():
-            second_write_started.set()
-            release_second_write.wait(timeout=5)
+        written.append(manager.acquire_write_buffer(SIZE, SIZE, GL_RGBA8))
+        first_acquired.set()
+        release_first.wait(timeout=5)
+        manager.release_write_buffer()
+        written.append(manager.acquire_write_buffer(SIZE, SIZE, GL_RGBA8))
+        second_acquired.set()
+        release_second.wait(timeout=5)
+        manager.release_write_buffer()
 
     writer_thread = threading.Thread(target=writer, daemon=True)
     writer_thread.start()
-    assert first_write_started.wait(timeout=5)
-    threading.Timer(0.05, release_first_write.set).start()
+    assert first_acquired.wait(timeout=5)
+    threading.Timer(0.05, release_first.set).start()
 
-    with manager.acquire_read_buffer(timeout=5) as frame:
-        assert frame.frame_serial == 2
+    buffer, _ = timed_read(manager, timeout=5)
+    assert buffer is written[0]
 
-    assert second_write_started.wait(timeout=5)
-    release_second_write.set()
+    assert second_acquired.wait(timeout=5)
+    release_second.set()
     writer_thread.join(timeout=5)
 
 
-def test_close_wakes_waiting_reader(fake_gl: FakeGL, fake_allocator: FakeAllocator):
-    manager = BufferManager(16, 16, GL_RGBA8)
+def test_shutdown_wakes_waiting_reader(manager: Any):
     publish_frame(manager)
-    read_results: list[Any] = []
-
-    def reader() -> None:
-        with manager.acquire_read_buffer(timeout=5) as frame:
-            read_results.append(frame)
-
-    with HeldWrite(manager):
-        reader_thread = threading.Thread(target=reader, daemon=True)
+    with HeldWrite(manager) as held_write:
+        held_write.shut_down(delay=0.05)
         started = time.perf_counter()
-        reader_thread.start()
-        time.sleep(0.05)
-        manager.close()
-        reader_thread.join(timeout=5)
-        elapsed = time.perf_counter() - started
-    assert read_results == [None]
-    assert elapsed < 2
+        with pytest.raises(RuntimeError, match="not active"):
+            manager.acquire_read_buffer(timeout=5)
+        assert time.perf_counter() - started < 2
 
 
 # ---- GL integration: real shared contexts ----
@@ -757,7 +733,7 @@ def fixture_gl_windows() -> Iterator[tuple[Any, Any]]:
 
 
 def test_gl_two_threads_never_show_wrong_frame(gl_windows: tuple[Any, Any]):
-    """P clears each frame to a colour encoding its serial, C checks every read.
+    """P clears each frame to a colour encoding its number, C checks every read.
 
     Random GPU workloads and resizes stress the fence handoff between contexts.
     """
@@ -765,47 +741,59 @@ def test_gl_two_threads_never_show_wrong_frame(gl_windows: tuple[Any, Any]):
 
     main_window, shadow_window = gl_windows
     utils_module.make_gl_context_current(main_window)
-    manager = BufferManager(16, 16, GL_RGBA8)
+    manager = TripleBufferManager(SIZE, SIZE, GL_RGBA8)
     frames_to_produce = 300
+    # frame number per buffer, set by P before publishing. C reads the entry of
+    # the buffer it holds, which P can't touch until C releases it.
+    frame_number_in_buffer: dict[int, int] = {}
+    producer_done = threading.Event()
+    consumer_done = threading.Event()
     producer_errors: list[BaseException] = []
-    rng = random.Random(1)
 
     def producer() -> None:
+        rng = random.Random(1)
+        utils_module.make_gl_context_current(shadow_window)
         try:
-            utils_module.make_gl_context_current(shadow_window)
-            frame_size = 16
-            for _ in range(frames_to_produce):
-                with manager.acquire_write_buffer() as buffer:
-                    if rng.random() < 0.05:
-                        frame_size = rng.choice((8, 16, 24, 32))
-                    buffer.set_frame_size(frame_size, frame_size, GL_RGBA8)
-                    serial_after_publish = manager.published_frame_count + 1
-                    gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, buffer.fbo_id)
-                    gl.glViewport(0, 0, frame_size, frame_size)
-                    gl.glClearColor((serial_after_publish % 256) / 255.0, 0, 0, 1)
-                    for _ in range(rng.randint(1, 50)):  # vary the GPU work
-                        gl.glClear(gl.GL_COLOR_BUFFER_BIT)
-                    gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, 0)
+            frame_size = SIZE
+            for frame_number in range(1, frames_to_produce + 1):
+                if rng.random() < 0.05:
+                    frame_size = rng.choice((8, 16, 24, 32))
+                buffer = manager.acquire_write_buffer(frame_size, frame_size, GL_RGBA8)
+                gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, buffer.fbo_id)
+                gl.glViewport(0, 0, frame_size, frame_size)
+                gl.glClearColor((frame_number % 256) / 255.0, 0, 0, 1)
+                for _ in range(rng.randint(1, 50)):  # vary the GPU work
+                    gl.glClear(gl.GL_COLOR_BUFFER_BIT)
+                gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, 0)
+                frame_number_in_buffer[id(buffer)] = frame_number
+                manager.release_write_buffer()
                 time.sleep(rng.uniform(0, 0.003))
+            producer_done.set()
+            consumer_done.wait(timeout=10)
         except BaseException as error:  # noqa: BLE001
             producer_errors.append(error)
         finally:
+            manager.shutdown()
             utils_module.release_gl_context()
 
     producer_thread = threading.Thread(target=producer)
     producer_thread.start()
 
+    rng = random.Random(2)
     mismatches: list[str] = []
     frames_read = 0
+    last_frame_number = 0
     utils_module.make_gl_context_current(main_window)
-    while producer_thread.is_alive() or frames_read == 0:
-        with manager.acquire_read_buffer(
-            timeout=rng.choice((0, 0.001, 0.005))
-        ) as frame:
-            if frame is None:
-                continue
+    while not producer_done.is_set() and producer_thread.is_alive():
+        buffer = manager.acquire_read_buffer(timeout=rng.choice((0, 0.001, 0.005)))
+        if buffer is None:
+            continue
+        try:
             frames_read += 1
-            buffer = frame.buffer
+            expected = frame_number_in_buffer[id(buffer)]
+            if expected < last_frame_number:
+                mismatches.append(f"frame {expected} after {last_frame_number}")
+            last_frame_number = expected
             pixels = (
                 ctypes.c_ubyte * (buffer.allocated_width * buffer.allocated_height * 4)
             )()
@@ -814,13 +802,14 @@ def test_gl_two_threads_never_show_wrong_frame(gl_windows: tuple[Any, Any]):
                 gl.GL_TEXTURE_2D, 0, gl.GL_RGBA, gl.GL_UNSIGNED_BYTE, pixels
             )
             gl.glBindTexture(gl.GL_TEXTURE_2D, 0)
-            if pixels[0] != frame.frame_serial % 256:
-                mismatches.append(f"frame {frame.frame_serial}: red={pixels[0]}")
+            if pixels[0] != expected % 256:
+                mismatches.append(f"frame {expected}: red={pixels[0]}")
+        finally:
+            manager.release_read_buffer()
         time.sleep(rng.uniform(0, 0.002))
 
+    consumer_done.set()
     producer_thread.join(timeout=10)
-    manager.close()
     assert producer_errors == []
-    assert manager.published_frame_count == frames_to_produce
     assert frames_read > 0
     assert mismatches == []
